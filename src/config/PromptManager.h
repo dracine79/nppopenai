@@ -28,10 +28,13 @@ struct Prompt
  * Parses the instructions file containing system prompts
  *
  * The file can contain multiple prompts in INI-style format:
+ * [Global]
+ * Shared instructions applied to every named prompt.
  * [Prompt:name]
  * Prompt content here...
  *
- * If no section headers are found, the entire file content is treated as a single prompt.
+ * Text before the first section is ignored when named prompts are present.
+ * If no section headers are found, the entire file is a single prompt.
  *
  * @param filePath Path to the instructions/prompts file
  * @param prompts Output vector that will be filled with parsed prompts

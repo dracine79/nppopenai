@@ -207,6 +207,19 @@ namespace ConfigManagerImpl
 
         ::GetPrivateProfileString(TEXT("API"), TEXT("model"), configAPIValue_model.c_str(), buffer, 1024, iniFilePath);
         configAPIValue_model = buffer;
+        // INI files ignore full-line ';' comments, but retain inline comments
+        // in the value. Send only the exact model tag to the API.
+        const size_t modelComment = configAPIValue_model.find(L';');
+        if (modelComment != std::wstring::npos)
+            configAPIValue_model.erase(modelComment);
+        const size_t modelStart = configAPIValue_model.find_first_not_of(L" \t\r\n");
+        if (modelStart == std::wstring::npos)
+            configAPIValue_model.clear();
+        else
+        {
+            const size_t modelEnd = configAPIValue_model.find_last_not_of(L" \t\r\n");
+            configAPIValue_model = configAPIValue_model.substr(modelStart, modelEnd - modelStart + 1);
+        }
 
         ::GetPrivateProfileString(TEXT("API"), TEXT("temperature"), configAPIValue_temperature.c_str(), buffer, 1024, iniFilePath);
         configAPIValue_temperature = buffer;

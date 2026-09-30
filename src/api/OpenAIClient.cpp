@@ -278,9 +278,26 @@ namespace OpenAIClientImpl
         std::string chatRoute = toUTF8(configAPIValue_chatRoute);
         std::string url = APIUtils::buildApiUrl(baseUrl, chatRoute);
         */
-        std::string url = toUTF8(configAPIValue_apiURL);
-        std::string proxy = toUTF8(configAPIValue_proxyURL);
         std::string apiType = toUTF8(configAPIValue_responseType);
+        std::string url = toUTF8(configAPIValue_apiURL);
+        // Ollama's root URL answers health checks but does not accept generation
+        // requests. Preserve a full endpoint when one was configured explicitly.
+        if (apiType == "ollama")
+        {
+            const size_t schemeEnd = url.find("://");
+            const size_t pathStart = url.find('/', schemeEnd == std::string::npos ? 0 : schemeEnd + 3);
+            if (pathStart == std::string::npos || url.find_first_not_of('/', pathStart) == std::string::npos)
+            {
+                while (!url.empty() && url.back() == '/')
+                    url.pop_back();
+                url += "/api/generate";
+            }
+            else if (url.compare(pathStart, std::string::npos, "/api") == 0)
+            {
+                url += "/generate";
+            }
+        }
+        std::string proxy = toUTF8(configAPIValue_proxyURL);
         std::string secretKey = toUTF8(configAPIValue_secretKey);
 
         std::string response;
