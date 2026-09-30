@@ -1,47 +1,42 @@
 # NppOpenAI personnalisé — Windows 64 bits
 
-DLL compilée à partir de [NppOpenAI](https://github.com/Krazal/nppopenai), version 0.5.0.0, révision `34da3cb`. Le fichier `source.patch` décrit les modifications. La licence du projet figure dans `LICENSE`.
-
-Ce dépôt est un [fork du projet original](https://github.com/Krazal/nppopenai). Il contient le code source modifié et les DLL livrées. Le dépôt distant `origin` correspond à ce fork; `upstream` pointe vers le projet original.
+Ce dépôt est un fork de [NppOpenAI](https://github.com/Krazal/nppopenai), sous la licence indiquée dans `LICENSE`. Le DLL `NppOpenAI.dll` est compilé pour Notepad++ 64 bits. `NppOpenAI-original.dll` conserve la version antérieure pour un retour en arrière.
 
 ## Installation
 
-1. Fermer complètement Notepad++.
-2. Copier `NppOpenAI.dll` dans `C:\Program Files\Notepad++\plugins\NppOpenAI\`, en remplaçant la DLL actuelle. Windows peut demander une autorisation d'administrateur.
-3. Rouvrir Notepad++. Les fichiers `NppOpenAI.ini` et `NppOpenAI_instructions` restent en place. `NppOpenAI-original.dll` est une copie de la DLL installée avant cette modification, pour un retour en arrière.
+1. Fermer Notepad++ complètement.
+2. Sauvegarder le DLL et les deux fichiers de configuration actifs.
+3. Copier `NppOpenAI.dll` dans `C:\Program Files\Notepad++\plugins\NppOpenAI\`.
+4. Pour utiliser les menus personnalisables avec les 22 instructions existantes, copier le fichier local `NppOpenAI_instructions.migrated` sous le nom `NppOpenAI_instructions` dans `%APPDATA%\Notepad++\plugins\Config\`. Ce fichier est généré localement et exclu du dépôt Git. Le fichier d'origine reste compatible, mais il apparaît sous un menu unique « Instructions ».
+5. Pour démarrer les deux options à `0` avec les autres paramètres actuels conservés, copier `NppOpenAI.ini.migrated` sous le nom `NppOpenAI.ini` au même endroit. Ce fichier est aussi local et exclu de Git. Une valeur `1` déjà présente dans le `.ini` actif reste sinon prioritaire sur le défaut `0`.
+6. Rouvrir Notepad++ et utiliser `Ctrl+Maj+O`.
 
-## Choix d'une instruction
+## Sélecteur
 
-La fenêtre a une largeur fixe et une liste verticale regroupée par famille. Le champ du haut filtre les noms. `Tab` passe à la liste, les flèches déplacent la sélection et `Entrée` la valide. `Échap` annule. On peut également double-cliquer une instruction.
+Le menu Windows est construit selon `[Menu]` dans `NppOpenAI_instructions`; les libellés, l'ordre et les sous-menus se changent dans ce fichier, sans recompilation. Les menus s'ouvrent à la souris ou par `Alt` et la lettre soulignée. Un sous-menu peut être ajouté avec deux espaces d'indentation supplémentaires, pour un maximum de trois niveaux feuille comprise.
 
-Raccourcis de famille : `Alt+T` Tous, `Alt+E` Édition, `Alt+O` Tonalité, `Alt+F` Format, `Alt+C` Commandes. `Alt+V` valide la sélection. La dernière instruction utilisée reste présélectionnée si elle figure dans les résultats.
+Le focus initial est sur **Nom de l'instruction**. La recherche ignore la casse et les accents et montre une liste seulement avec une à quatre correspondances. Un choix dans le menu ou la liste remplit le nom; `Entrée` exécute l'instruction. Les cinq dernières instructions validées sont enregistrées par identifiant dans le `.ini`.
 
-La [spécification du futur sélecteur personnalisable](docs/SPEC_SELECTEUR_INSTRUCTIONS.md) décrit les menus définis dans le fichier d’instructions, la recherche avec complétion, les cinq choix récents, le champ Consignes et les options par appel. Ces fonctions ne sont pas encore présentes dans la DLL publiée.
+Dans le champ Nom au repos, `1` à `5` insèrent une instruction récente, `8` change **Conserver la sélection et la consigne**, et `9` change **Afficher le raisonnement**. Pendant la saisie partielle d'un nom, ces chiffres sont du texte ordinaire. La fenêtre peut être redimensionnée et mémorise sa taille.
 
-## Préprompt commun
+Le champ **Consignes** reçoit une précision ponctuelle distincte de la sélection. Le plugin ne recherche aucune balise `//` dans le document. Si la conservation est cochée, le passage reste en place et la consigne utilisée, si présente, est recopiée avant la réponse. Sinon, la réponse remplace la sélection. Une consigne seule peut être envoyée sans sélection. La réponse en flux est assemblée avant insertion : l'annulation et les erreurs conservent le passage; l'affichage progressif est suspendu dans cette version. L'option de raisonnement agit sur les blocs `<think>…</think>` présents dans le texte reçu.
 
-Ajouter une section `[Global]` dans `NppOpenAI_instructions`, par exemple entre le tableau de repères et le premier `[Prompt:...]` :
+## Fichier d'instructions
 
-```text
-[Global]
-En l'absence de consigne contraire, réponds en français dans un style neutre, clair et concis. Préserve les faits, chiffres, noms, termes techniques et nuances. N'invente pas d'information manquante.
+Le format cible accepte `[Info]` (notes non envoyées), `[Global]` (texte commun), `[PlaceHolder:ID]` (bloc réutilisable sans autre placeholder), `[Instruction:ID]` (instruction avec références `{{ID}}`) et `[Menu]` (arbre de libellés et identifiants). Le fichier `NppOpenAI_instructions.example` illustre la syntaxe. Les anciens blocs `[Prompt:Nom]` restent utilisables; mélanger les deux formats est refusé avec un diagnostic.
+
+Le script `tools/Migrate-Instructions.ps1` convertit une copie de l'ancien fichier en conservant ses instructions et leurs identifiants. Il retire les anciennes lignes demandant au modèle d'interpréter une ligne initiale `//`, puisque le champ Consignes remplit désormais ce rôle. Il ne remplace jamais un fichier de sortie existant :
+
+```powershell
+.\tools\Migrate-Instructions.ps1 -InputPath 'chemin\NppOpenAI_instructions' -OutputPath 'chemin\NppOpenAI_instructions.migrated'
 ```
 
-Le contenu de `[Global]` est ajouté à chaque instruction nommée. Le tableau de repères situé avant les sections reste exclu des appels au modèle. Une section `[Global]` vide ne change rien. Les 22 instructions actuelles restent utilisables telles quelles.
+Le fichier est lu et validé avant l'appel au modèle : identifiants, références, indentation, profondeur, libellés et touches d'accès explicites sont vérifiés. Une erreur empêche l'appel et précise la ligne lorsque la source de l'erreur est localisable.
 
-## Modèle dans `NppOpenAI.ini`
+## Configuration du modèle
 
-Conserver **une seule** ligne `model=` active dans la section `[API]`. Les autres peuvent commencer par `;`. Une description peut suivre le nom du modèle après un autre `;` :
+Dans `[API]` du `.ini`, une seule ligne `model=` doit être active. Les autres peuvent commencer par `;`; une description finale après `;` est ignorée lors de l'appel à l'API. L'URL Ollama vient toujours du `.ini` et n'est pas inscrite dans le DLL. Dans `[PLUGIN]`, `keep_question=0` et `show_reasoning=0` sont les valeurs par défaut. Les cases de la fenêtre reprennent ces valeurs à chaque ouverture, et leur modification ponctuelle ne les enregistre pas.
 
-```ini
-;model=qwen3.5:27b       ; Modèle polyvalent
-model=granite4.2:8b     ; Modèle courant
-```
+## Vérifications
 
-La nouvelle DLL retire le commentaire final et les espaces avant l'appel à l'API. Pour changer de modèle, commenter l'ancienne ligne et décommenter la nouvelle, puis enregistrer le fichier. Redémarrer Notepad++ si le changement ne prend pas effet immédiatement.
-
-Pour `response_type=ollama`, `api_url` peut être l'adresse de base du serveur ou l'adresse complète de `/api/generate`. La DLL ajoute ce chemin seulement si aucun chemin d'API n'est déjà indiqué. L'adresse du serveur provient toujours du `.ini`; elle n'est pas inscrite dans la DLL.
-
-## Vérification effectuée
-
-Compilation x64 réussie; version et exports requis de Notepad++ présents. Le parseur a été testé avec un préprompt commun, une instruction unique et les 22 instructions du fichier actuel. La fenêtre a été testée avec recherche, filtre de famille et absence de résultat. La lecture Windows des commentaires INI a été vérifiée. Le serveur Ollama a répondu aux appels de génération standard et en flux avec le modèle actif (`HTTP 200`), y compris avec un transfert HTTP en blocs. Aucun essai visuel dans l'installation courante de Notepad++ n'a été réalisé.
+Compilation Release x64 avec Visual Studio 2022. Le test `CatalogProbe` vérifie le nouveau format, l'ancien format et plusieurs erreurs de structure; le fichier migré de 22 instructions passe la validation. Le test `ChooserSmoke` ouvre la vraie boîte de dialogue et vérifie le menu, la recherche accentuée, les instructions récentes et les deux options. Le fonctionnement dans l'installation active de Notepad++ et la réponse du serveur après installation restent à vérifier sur place.

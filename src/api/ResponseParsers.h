@@ -52,7 +52,7 @@ namespace ResponseParsers
      * @param text The text to process
      * @return The processed text with thinking sections handled according to config
      */
-    std::string processThinkingSections(const std::string &text);
+    std::string processThinkingSections(const std::string &text, bool showReasoning);
 }
 
 #endif // RESPONSE_PARSERS_H

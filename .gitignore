@@ -88,6 +88,11 @@ $RECYCLE.BIN/
 # Ignore the bin64 folder (used for distributions)
 bin64/
 bin32/
+tests/bin/
+tests/obj/
+tests/obj-chooser/
+NppOpenAI_instructions.migrated
+NppOpenAI.ini.migrated
 
 *_PRIVATE.md
 *.exp

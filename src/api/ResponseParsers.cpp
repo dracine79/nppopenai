@@ -17,7 +17,6 @@
 
 #include "ResponseParsers.h"
 #include "utils/EncodingUtils.h" // for multiByteToWideChar
-#include "external_globals.h"    // for configAPIValue_showReasoning
 #include <string>
 #include <stdexcept>
 
@@ -32,8 +31,6 @@ namespace ResponseParsers
             if (respJson.contains("choices") && respJson["choices"].is_array() && !respJson["choices"].empty())
             {
                 replyText = respJson["choices"][0]["message"]["content"].get<std::string>();
-                // Process any thinking sections in the response
-                replyText = processThinkingSections(replyText);
             }
             else
             {
@@ -75,8 +72,6 @@ namespace ResponseParsers
                     if (respJson.contains("response"))
                     {
                         replyText = respJson["response"].get<std::string>();
-                        // Process any thinking sections in the response
-                        replyText = processThinkingSections(replyText);
                     }
                 }
                 else
@@ -90,8 +85,6 @@ namespace ResponseParsers
                 if (respJson.contains("response"))
                 {
                     replyText = respJson["response"].get<std::string>();
-                    // Process any thinking sections in the response
-                    replyText = processThinkingSections(replyText);
                 }
                 else if (respJson.contains("error"))
                 {
@@ -142,8 +135,6 @@ namespace ResponseParsers
                 }
                 else
                 {
-                    // Process any thinking sections in the response
-                    replyText = processThinkingSections(replyText);
                 }
             }
             else
@@ -189,8 +180,6 @@ namespace ResponseParsers
                 return replyText; // Return early to skip processing non-existent text
             }
 
-            // Process any thinking sections in the response
-            replyText = processThinkingSections(replyText);
         }
         catch (const std::exception &e)
         {
@@ -235,17 +224,14 @@ namespace ResponseParsers
        * If show_reasoning=1 is set in the INI file, these sections are preserved.
        * If show_reasoning=0 (default), these sections are removed from the final output.
        *
-       * For streaming responses, this is applied to each chunk as it arrives, which means that
-       * thinking sections split across multiple chunks might only be partially removed.
+       * Streaming fragments are assembled before this filter runs, so tags split
+       * across network chunks are handled consistently.
        *
        * @param text The input text potentially containing thinking sections
        * @return The text with thinking sections either preserved or removed
        */
-    std::string processThinkingSections(const std::string &text)
+    std::string processThinkingSections(const std::string &text, bool showReasoning)
     {
-        // Check if we should show reasoning sections
-        bool showReasoning = (configAPIValue_showReasoning == L"1");
-
         if (showReasoning)
         {
             // Return the text as-is if we're showing reasoning
@@ -269,7 +255,8 @@ namespace ResponseParsers
             }
             else
             {
-                // If closing tag is not found, break to avoid infinite loop
+                // An incomplete reasoning block must not leak into the document.
+                result.erase(thinkStart);
                 break;
             }
         }

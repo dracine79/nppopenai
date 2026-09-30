@@ -76,7 +76,7 @@ void writeDefaultConfig()
 
     // Create plugin section with default values
     ::WritePrivateProfileString(TEXT("PLUGIN"), TEXT("total_tokens_used"), TEXT("0"), iniFilePath);
-    ::WritePrivateProfileString(TEXT("PLUGIN"), TEXT("keep_question"), TEXT("1"), iniFilePath);
+    ::WritePrivateProfileString(TEXT("PLUGIN"), TEXT("keep_question"), TEXT("0"), iniFilePath);
     ::WritePrivateProfileString(TEXT("PLUGIN"), TEXT("is_chat"), TEXT("0"), iniFilePath);
     ::WritePrivateProfileString(TEXT("PLUGIN"), TEXT("chat_limit"), TEXT("10"), iniFilePath);
 }
@@ -243,6 +243,8 @@ namespace ConfigManagerImpl
 
         // Load show_reasoning option
         ::GetPrivateProfileString(TEXT("API"), TEXT("show_reasoning"), configAPIValue_showReasoning.c_str(), buffer, 1024, iniFilePath);
+        configAPIValue_showReasoning = buffer;
+        ::GetPrivateProfileString(TEXT("PLUGIN"), TEXT("show_reasoning"), configAPIValue_showReasoning.c_str(), buffer, 1024, iniFilePath);
         configAPIValue_showReasoning = buffer;
 
         // Read plugin settings if requested

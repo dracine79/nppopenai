@@ -100,24 +100,18 @@ bool HTTPClient::performRequest(
  * @param request The JSON request body as a string
  * @param apiType The type of API (openai, claude, ollama, etc.)
  * @param secretKey The API key for authentication
- * @param targetWindow The window handle to receive streaming chunks
- * @param streamMessageType The Windows message type for streaming chunks
+ * @param response Output buffer for the complete streamed response
  * @param proxy Optional proxy server to use (or "0" for no proxy)
  * @return true if the request was successful (200-level response), false otherwise
  */
 bool HTTPClient::performStreamingRequest(
     const std::string &url,
     const std::string &request,
+    std::string &response,
     const std::string &apiType,
     const std::string &secretKey,
-    void *targetWindow,
-    unsigned int streamMessageType,
     const std::string &proxy)
 {
-    // The streamMessageType parameter contains the message ID to use for posting chunks
-    // We still need to cast it to void to suppress any unused parameter warnings
-    (void)streamMessageType; // Will actually use WM_OPENAI_STREAM_CHUNK from OpenAIClient.cpp
-
     CURL *curl = curl_easy_init();
     if (!curl)
         return false;
@@ -149,7 +143,7 @@ bool HTTPClient::performStreamingRequest(
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str()); // Set URL before async call
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, OpenAIStreamCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, targetWindow);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 
     // Important: Set these options for proper streaming behavior
     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
@@ -165,10 +159,6 @@ bool HTTPClient::performStreamingRequest(
     {
         ::SendMessage(nppData._nppHandle, NPPM_SETSTATUSBAR, STATUSBAR_DOC_TYPE, (LPARAM)L"Starting streaming request...");
     }
-
-	// Begin undo action in Scintilla editor to allow for proper undo/redo behavior
-    HWND curScintilla = EditorInterface::getCurrentScintilla();
-    ::SendMessage(curScintilla, SCI_BEGINUNDOACTION, 0, 0);
 
     // Perform the request asynchronously
     auto futureRes = std::async(std::launch::async, [curl]()
@@ -191,9 +181,6 @@ bool HTTPClient::performStreamingRequest(
     res = futureRes.get(); // Get HTTP status code
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-
-	// End undo action in Scintilla editor
-    ::SendMessage(curScintilla, SCI_ENDUNDOACTION, 0, 0);
 
     // Add debugging for the HTTP response
     if (debugMode)

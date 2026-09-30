@@ -1,4 +1,4 @@
-/**
+﻿/**
  * OpenAIClient.cpp - Implementation of OpenAI API client functionality
  *
  * This file handles communication with various LLM APIs and manages the
@@ -29,19 +29,10 @@
 #include "editor/EditorInterface.h"
 
 /**
- * Streaming API response handling
- *
- * The plugin supports streaming responses from LLMs, where text is returned incrementally
- * rather than all at once. This provides a more interactive experience as the user can
- * see the response being generated in real-time.
- *
- * Streaming implementation uses Windows messages to safely communicate between the
- * background network thread and the UI thread. Each chunk of text is processed and
- * sent via the WM_OPENAI_STREAM_CHUNK message.
+ * Stream data is buffered until the request succeeds. This keeps the selected
+ * source intact on cancellation or failure and lets reasoning tags be filtered
+ * even when the network splits a tag across chunks.
  */
-
-// define custom message for streaming chunks
-#define WM_OPENAI_STREAM_CHUNK (WM_APP + 100)
 
 // Global handle to direct streaming chunks (defined in external_globals.h)
 HWND s_streamTargetScintilla = nullptr;
@@ -67,75 +58,39 @@ size_t OpenAIcURLCallback(void *contents, size_t size, size_t nmemb, void *userp
 }
 
 /**
- * CURL write callback for streaming: posts each chunk to the main thread
+ * CURL write callback for streaming: buffers the raw response
  *
  * @param contents The received data buffer
  * @param size Always 1
  * @param nmemb The size of the data received
- * @param userp User-provided pointer (window handle)
+ * @param userp User-provided pointer (std::string response buffer)
  * @return The number of bytes processed (should match nmemb on success)
  */
 size_t OpenAIStreamCallback(void *contents, size_t size, size_t nmemb, void *userp)
 {
-    // We need to use userp to know where to send messages
-    HWND targetWindow = static_cast<HWND>(userp);
-    if (!targetWindow)
-    {
-        targetWindow = nppData._nppHandle; // Fallback to main Notepad++ window
-    }
-
-    size_t totalSize = size * nmemb;
-    std::string chunk(static_cast<char *>(contents), totalSize);
-    std::string content;
-
-    try
-    {
-        // Handle streaming responses for different API formats
-        if (!chunk.empty())
-        {
-            std::string apiType = toUTF8(configAPIValue_responseType);
-            content = StreamParser::extractContent(chunk, apiType);
-        }
-
-        // If we have content to display or this might be plain text (and short)
-        if (!content.empty() || (chunk.size() < 100 && !StreamParser::isCompletionMarker(chunk)))
-        {
-            // If we couldn't extract content but have a small chunk, use the raw chunk
-            if (content.empty() && chunk.size() < 100 && !StreamParser::isCompletionMarker(chunk))
-            {
-                content = chunk;
-            }
-
-            // Only send non-empty content
-            if (!content.empty())
-            {
-                // Send content directly to the Scintilla editor
-                // This bypasses the problematic PostMessage approach
-                if (s_streamTargetScintilla && IsWindow(s_streamTargetScintilla))
-                {
-                    // Use SCI_REPLACESEL to insert the content at the current position
-                    ::SendMessage(s_streamTargetScintilla, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(content.c_str()));
-                }
-            }
-        }
-    }
-    catch (...)
-    {
-        // Fallback for any unexpected errors - just send the raw chunk
-        // But first check if it's a completion marker
-        if (StreamParser::isCompletionMarker(chunk))
-        {
-            return totalSize;
-        }
-
-        // Send content directly to the Scintilla editor (fallback path)
-        if (s_streamTargetScintilla && IsWindow(s_streamTargetScintilla))
-        {
-            ::SendMessage(s_streamTargetScintilla, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(chunk.c_str()));
-        }
-    }
-
+    const size_t totalSize = size * nmemb;
+    auto *response = static_cast<std::string *>(userp);
+    response->append(static_cast<char *>(contents), totalSize);
     return _loaderDlg.isCancelled() ? CURL_READFUNC_ABORT : totalSize;
+}
+
+static std::string extractStreamContent(const std::string &wire, const std::string &apiType)
+{
+    std::string content;
+    size_t start = 0;
+    while (start < wire.size())
+    {
+        const size_t end = wire.find('\n', start);
+        std::string line = wire.substr(start, end == std::string::npos ? end : end - start);
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        if (!line.empty())
+            content += StreamParser::extractContent(line, apiType);
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+    return content;
 }
 
 /**
@@ -197,43 +152,35 @@ namespace OpenAIClientImpl
             return;
         }
 
-        // Get selected text
-        std::string selectedText = EditorInterface::getSelectedText(curScintilla);
-        if (selectedText.empty())
+        const std::string selectedText = EditorInterface::getSelectedText(curScintilla);
+        PromptCatalog catalog;
+        std::wstring catalogError;
+        if (!loadPromptCatalog(instructionsFilePath, catalog, catalogError))
         {
-            instructionsFileError(L"No text selected.", L"NppOpenAI Error");
+            instructionsFileError(catalogError.c_str(), L"NppOpenAI - Instructions invalides");
             return;
-        } // Get system prompt - handle multiple prompts case BEFORE showing loader
-        std::wstring systemPrompt = APIUtils::getSystemPrompt();
-
-        // If multiple prompts are available, show selection dialog
-        if (systemPrompt == L"MULTIPLE_PROMPTS_AVAILABLE")
+        }
+        if (catalog.prompts.empty())
         {
-            // Parse prompts from instructions file
-            std::vector<Prompt> prompts;
-            parseInstructionsFile(instructionsFilePath, prompts);
-
-            if (prompts.size() > 1)
-            {
-                // Show prompt selection dialog
-                static int lastUsedPromptIndex = -1; // Local static variable to remember last choice
-                int selectedPromptIndex = choosePrompt(nppData._nppHandle, prompts, lastUsedPromptIndex);
-
-                if (selectedPromptIndex == -1)
-                {
-                    // User cancelled the dialog
-                    return;
-                }
-
-                // Remember the user's choice for next time
-                lastUsedPromptIndex = selectedPromptIndex;
-                systemPrompt = prompts[selectedPromptIndex].content;
-            }
-            else
-            {
-                // Fallback to default if something went wrong
-                systemPrompt = configAPIValue_instructions;
-            }
+            instructionsFileError(L"Aucune instruction dans le fichier.", L"NppOpenAI Error");
+            return;
+        }
+        PromptChoice choice;
+        if (!choosePrompt(nppData._nppHandle, catalog, iniFilePath,
+            isKeepQuestion, configAPIValue_showReasoning == L"1", choice))
+            return;
+        if (selectedText.empty() && choice.consignes.empty())
+        {
+            instructionsFileError(L"Sélectionner du texte ou saisir une consigne.", L"NppOpenAI Error");
+            return;
+        }
+        const std::wstring systemPrompt = catalog.prompts[static_cast<size_t>(choice.promptIndex)].content;
+        std::string userText = selectedText;
+        if (!choice.consignes.empty())
+        {
+            userText = "Consignes ponctuelles :\n" + toUTF8(choice.consignes);
+            if (!selectedText.empty())
+                userText += "\n\nTexte à traiter :\n" + selectedText;
         }
 
         // NOW show the loader dialog after prompt selection is complete
@@ -267,7 +214,7 @@ namespace OpenAIClientImpl
 
         // Prepare API request with grouped options
         std::string request = APIUtils::prepareApiRequest(
-            selectedText,
+            userText,
             systemPrompt,
             configAPIValue_responseType,
             options);
@@ -311,14 +258,7 @@ namespace OpenAIClientImpl
                 ::SendMessage(nppData._nppHandle, NPPM_SETSTATUSBAR, STATUSBAR_DOC_TYPE, (LPARAM)debugMsg.c_str());
             }
 
-            // We no longer need to set s_streamTargetScintilla, the message handler gets the current Scintilla            // Prepare editor for streaming response using the proper interface
-            EditorInterface::prepareForStreamingResponse(curScintilla, selectedText, isKeepQuestion, configAPIValue_responseType);
-
-            // Store the current Scintilla handle for the streaming process
-            s_streamTargetScintilla = curScintilla; // Perform streaming request with the correct message type
-            ok = HTTPClient::performStreamingRequest(url, request, apiType, secretKey,
-                                                     nppData._nppHandle, // Use nppData._nppHandle as target for messages
-                                                     WM_OPENAI_STREAM_CHUNK, proxy);
+            ok = HTTPClient::performStreamingRequest(url, request, response, apiType, secretKey, proxy);
         }
         else
         {
@@ -359,58 +299,45 @@ namespace OpenAIClientImpl
                 instructionsFileError(errorMsg.c_str(), L"NppOpenAI Error");
             }
             return;
-        } // Handle non-streaming response
-        if (!streaming)
-        {
-            // Parse response and extract content using the correct parser
-            auto parser = ResponseParsers::getParserForEndpoint(configAPIValue_responseType);
-            std::string extractedContent = parser(response);
-            if (!extractedContent.empty())
-            {
-                // For non-streaming with keepQuestion, mimic streaming behavior:
-                // Keep the question in place and append the response after it
-                if (isKeepQuestion)
-                {
-                    // Move cursor to end of selection (after the question)
-                    Sci_Position selEnd = ::SendMessage(curScintilla, SCI_GETSELECTIONEND, 0, 0);
-                    ::SendMessage(curScintilla, SCI_SETSEL, selEnd, selEnd);
-
-                    // Add appropriate spacing and the response after the question
-                    std::string eolString = EditorInterface::getNewlineString(curScintilla); // Get Scintilla line ending style to determine appropriate spacing
-                    std::string responseText;
-                    if (configAPIValue_responseType == L"ollama")
-                    {
-                        responseText = eolString + extractedContent;
-                    }
-                    else
-                    {
-                        responseText = eolString + eolString + extractedContent;
-                    }
-
-                    // Insert the response after the question
-                    EditorInterface::insertTextAtCursor(curScintilla, responseText);
-
-                    // Debug output to verify behavior
-                    if (debugMode)
-                    {
-                        std::string debugMsg = "Non-streaming: Inserted response after question (like streaming mode)";
-                        ::SendMessage(nppData._nppHandle, NPPM_SETSTATUSBAR, STATUSBAR_DOC_TYPE, (LPARAM)debugMsg.c_str());
-                    }
-                }
-                else
-                {
-                    // Replace the selected text entirely with the response
-                    EditorInterface::replaceSelectedText(curScintilla, extractedContent);
-                }
-            }
-            else
-            {
-                instructionsFileError(L"Failed to parse API response", L"NppOpenAI Error");
-                _loaderDlg.display(false);
-                return;
-            }
         }
-        // For streaming mode, the text is already in the editor through the callback        // Calculate and display elapsed time
+        std::string extractedContent;
+        if (streaming)
+            extractedContent = extractStreamContent(response, apiType);
+        else
+        {
+            auto parser = ResponseParsers::getParserForEndpoint(configAPIValue_responseType);
+            extractedContent = parser(response);
+        }
+        if (extractedContent.rfind("[Error", 0) == 0 ||
+            extractedContent.rfind("[Failed to parse", 0) == 0)
+        {
+            const std::wstring error = stringToWstring(extractedContent);
+            instructionsFileError(error.c_str(), L"NppOpenAI - Réponse invalide");
+            _loaderDlg.display(false);
+            return;
+        }
+        extractedContent = ResponseParsers::processThinkingSections(extractedContent, choice.showReasoning);
+        if (extractedContent.empty())
+        {
+            instructionsFileError(L"Réponse vide ou impossible à lire.", L"NppOpenAI Error");
+            _loaderDlg.display(false);
+            return;
+        }
+        const std::string eol = EditorInterface::getNewlineString(curScintilla);
+        if (choice.keepSelection)
+        {
+            const Sci_Position selEnd = ::SendMessage(curScintilla, SCI_GETSELECTIONEND, 0, 0);
+            ::SendMessage(curScintilla, SCI_SETSEL, selEnd, selEnd);
+            std::string insertion = eol + eol;
+            if (!choice.consignes.empty())
+                insertion += "Consigne appliquée : " + toUTF8(choice.consignes) + eol + eol;
+            insertion += extractedContent;
+            EditorInterface::insertTextAtCursor(curScintilla, insertion);
+        }
+        else
+            EditorInterface::replaceSelectedText(curScintilla, extractedContent);
+
+        // Calculate and display elapsed time
         auto endTime = std::chrono::high_resolution_clock::now();
         auto elapsedMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
         double elapsedSeconds = elapsedMilliseconds / 1000.0;

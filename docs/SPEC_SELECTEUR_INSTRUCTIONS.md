@@ -1,6 +1,6 @@
 # Spécification — Sélecteur d’instructions personnalisable
 
-**Statut :** conception fonctionnelle, non implémentée. Ce document décrit le comportement visé pour le fork personnalisé de NppOpenAI. La DLL actuellement publiée conserve son interface et son format d’instructions existants.
+**Statut :** implémenté dans le fork personnalisé. Compilation et tests du parseur et de la fenêtre réalisés; essai final dans l’installation active de Notepad++ à effectuer après installation.
 
 ## 1. Objectif
 
@@ -47,7 +47,7 @@ Le libellé « Afficher le raisonnement » doit correspondre au comportement eff
 
 ## 5. Structure cible de `NppOpenAI_instructions`
 
-La syntaxe détaillée ci-dessous est une **proposition de sérialisation à valider avant le codage**. La séparation fonctionnelle des quatre sections est arrêtée.
+La syntaxe détaillée ci-dessous est celle du format implémenté. La section existante `[Global]` reste également disponible.
 
 | Section | Contenu et effet |
 |---|---|
@@ -58,9 +58,9 @@ La syntaxe détaillée ci-dessous est une **proposition de sérialisation à val
 
 La profondeur maximale est de **trois niveaux, feuille comprise** : menu → sous-menu → instruction. Une instruction peut être placée à plusieurs endroits ou sous plusieurs libellés, sans dupliquer son texte; elle n’apparaît qu’une fois dans les récents. Les identifiants restent distincts des libellés visibles et ne changent pas lorsqu’un menu est renommé.
 
-Proposition de notation : un en-tête de bloc nomme chaque placeholder ou instruction; une référence dans le contenu d’une instruction utilise une forme reconnaissable telle que `{{Nom}}`. Dans `Menu`, deux espaces représentent un niveau d’indentation; une feuille associe son libellé à l’identifiant de l’instruction. Le caractère `&`, suivant la convention Windows, pourrait désigner la lettre soulignée d’un menu, avec `&&` pour un `&` littéral. Si aucune lettre n’est donnée, une lettre disponible est déterminée automatiquement.
+Notation : un en-tête de bloc nomme chaque placeholder ou instruction; une référence dans le contenu d’une instruction utilise `{{Nom}}`. Dans `Menu`, deux espaces représentent un niveau d’indentation; une feuille associe son libellé à l’identifiant de l’instruction. Le caractère `&`, suivant la convention Windows, désigne la lettre soulignée d’un menu, avec `&&` pour un `&` littéral. Si aucune lettre n’est donnée, une lettre disponible est déterminée automatiquement.
 
-Exemple illustratif du nouveau format, **non pris en charge par la DLL actuelle** :
+Exemple illustratif du nouveau format :
 
 ```text
 [Info]
@@ -86,7 +86,7 @@ Commandes
 
 Les identifiants sont uniques et stables; les libellés du menu sont libres. Une indentation de deux espaces est retenue pour chaque niveau et les tabulations sont rejetées afin qu’un alignement visuel trompeur ne change pas la structure.
 
-La section existante `[Global]` conserve son rôle de texte commun appliqué une fois à chaque instruction pendant la migration. Les anciens blocs `[Prompt:…]` doivent continuer à fonctionner dans un fichier ancien; un fichier au nouveau format est traité comme tel, sans interprétation partielle par l’ancien parseur. Le nouveau format ne doit pas être installé avec la DLL actuelle. Aucun contenu de `Info` ou `Menu` n’est transmis au modèle.
+La section existante `[Global]` conserve son rôle de texte commun appliqué une fois à chaque instruction pendant la migration. Les anciens blocs `[Prompt:…]` restent fonctionnels dans un fichier ancien; un fichier au nouveau format est traité comme tel, sans interprétation partielle par l’ancien parseur. Installer le nouveau format en même temps que la nouvelle DLL. Aucun contenu de `Info` ou `Menu` n’est transmis au modèle.
 
 ## 6. Validation et cas limites
 

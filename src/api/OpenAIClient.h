@@ -56,7 +56,7 @@ size_t OpenAIcURLCallback(void *contents, size_t size, size_t nmemb, void *userp
  * @param contents Pointer to the response data buffer
  * @param size Always 1
  * @param nmemb Number of bytes in the data buffer
- * @param userp User-provided pointer (window handle)
+ * @param userp User-provided pointer (std::string response buffer)
  * @return Number of bytes processed
  */
 size_t OpenAIStreamCallback(void *contents, size_t size, size_t nmemb, void *userp);

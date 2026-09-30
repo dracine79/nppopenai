@@ -100,7 +100,7 @@ std::string APIUtils::prepareApiRequest(
 
     // Format request using the selected formatter
     std::string request = formatter(
-        multiByteToWideChar(selectedText.c_str()),
+        stringToWstring(selectedText),
         systemPrompt,
         options);
 

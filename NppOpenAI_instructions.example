@@ -1,0 +1,40 @@
+[Info]
+Exemple du nouveau format. Copier les blocs souhaités dans NppOpenAI_instructions.
+Deux espaces représentent un niveau de menu. La feuille contient le nom affiché,
+un signe égal et l'identifiant stable de l'instruction.
+
+[Global]
+En l'absence de consigne contraire, réponds en français. Préserve les faits,
+chiffres, noms, termes techniques et nuances. N'invente pas d'information.
+
+[PlaceHolder:TON_NEUTRE]
+Adopte un ton neutre, clair et concis. Retourne directement le résultat.
+
+[Instruction:ECRIRE]
+{{TON_NEUTRE}}
+Rédige le texte demandé selon la consigne et les éléments fournis. Signale
+brièvement une information indispensable absente au lieu de l'inventer.
+
+[Instruction:REECRIRE]
+{{TON_NEUTRE}}
+Réécris le passage avec une variation de formulation en conservant son sens,
+ses faits et son niveau de détail. Une nouvelle demande peut produire une autre
+version. Ne donne qu'une version à la fois.
+
+[Instruction:RESUMER]
+{{TON_NEUTRE}}
+Résume le contenu fourni en gardant les faits et les distinctions essentiels.
+N'ajoute aucune conclusion absente de la source.
+
+[Instruction:CERNER]
+Examine la problématique et pose des questions ciblées pour préciser son
+périmètre, ses limites et ce qui doit rester vrai dans tous les cas.
+
+[Menu]
+&Édition
+  Écrire = ECRIRE
+  Réécrire = REECRIRE
+  Résumer = RESUMER
+&Commandes
+  Exploration
+    Cerner = CERNER

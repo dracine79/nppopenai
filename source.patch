@@ -1,8 +1,304 @@
+diff --git a/src/api/APIUtils.cpp b/src/api/APIUtils.cpp
+index af2f3c0..78dbe78 100644
+--- a/src/api/APIUtils.cpp
++++ b/src/api/APIUtils.cpp
+@@ -100,7 +100,7 @@ std::string APIUtils::prepareApiRequest(
+ 
+     // Format request using the selected formatter
+     std::string request = formatter(
+-        multiByteToWideChar(selectedText.c_str()),
++        stringToWstring(selectedText),
+         systemPrompt,
+         options);
+ 
+diff --git a/src/api/HTTPClient.cpp b/src/api/HTTPClient.cpp
+index d55e1a9..0deede3 100644
+--- a/src/api/HTTPClient.cpp
++++ b/src/api/HTTPClient.cpp
+@@ -100,24 +100,18 @@ bool HTTPClient::performRequest(
+  * @param request The JSON request body as a string
+  * @param apiType The type of API (openai, claude, ollama, etc.)
+  * @param secretKey The API key for authentication
+- * @param targetWindow The window handle to receive streaming chunks
+- * @param streamMessageType The Windows message type for streaming chunks
++ * @param response Output buffer for the complete streamed response
+  * @param proxy Optional proxy server to use (or "0" for no proxy)
+  * @return true if the request was successful (200-level response), false otherwise
+  */
+ bool HTTPClient::performStreamingRequest(
+     const std::string &url,
+     const std::string &request,
++    std::string &response,
+     const std::string &apiType,
+     const std::string &secretKey,
+-    void *targetWindow,
+-    unsigned int streamMessageType,
+     const std::string &proxy)
+ {
+-    // The streamMessageType parameter contains the message ID to use for posting chunks
+-    // We still need to cast it to void to suppress any unused parameter warnings
+-    (void)streamMessageType; // Will actually use WM_OPENAI_STREAM_CHUNK from OpenAIClient.cpp
+-
+     CURL *curl = curl_easy_init();
+     if (!curl)
+         return false;
+@@ -149,7 +143,7 @@ bool HTTPClient::performStreamingRequest(
+     curl_easy_setopt(curl, CURLOPT_URL, url.c_str()); // Set URL before async call
+     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, request.c_str());
+     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, OpenAIStreamCallback);
+-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, targetWindow);
++    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+ 
+     // Important: Set these options for proper streaming behavior
+     curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_1_1);
+@@ -166,10 +160,6 @@ bool HTTPClient::performStreamingRequest(
+         ::SendMessage(nppData._nppHandle, NPPM_SETSTATUSBAR, STATUSBAR_DOC_TYPE, (LPARAM)L"Starting streaming request...");
+     }
+ 
+-	// Begin undo action in Scintilla editor to allow for proper undo/redo behavior
+-    HWND curScintilla = EditorInterface::getCurrentScintilla();
+-    ::SendMessage(curScintilla, SCI_BEGINUNDOACTION, 0, 0);
+-
+     // Perform the request asynchronously
+     auto futureRes = std::async(std::launch::async, [curl]()
+                                 {
+@@ -192,9 +182,6 @@ bool HTTPClient::performStreamingRequest(
+     long http_code = 0;
+     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+ 
+-	// End undo action in Scintilla editor
+-    ::SendMessage(curScintilla, SCI_ENDUNDOACTION, 0, 0);
+-
+     // Add debugging for the HTTP response
+     if (debugMode)
+     {
+diff --git a/src/api/HTTPClient.h b/src/api/HTTPClient.h
+index 3f92767..3f89051 100644
+--- a/src/api/HTTPClient.h
++++ b/src/api/HTTPClient.h
+@@ -25,10 +25,9 @@ public:
+     static bool performStreamingRequest(
+         const std::string &url,
+         const std::string &request,
++        std::string &response,
+         const std::string &apiType,
+         const std::string &secretKey,
+-        void *targetWindow,
+-        unsigned int streamMessageType,
+         const std::string &proxy = "");
+ 
+ private:
 diff --git a/src/api/OpenAIClient.cpp b/src/api/OpenAIClient.cpp
-index 569f58e..019e13d 100644
+index 569f58e..db42630 100644
 --- a/src/api/OpenAIClient.cpp
 +++ b/src/api/OpenAIClient.cpp
-@@ -278,9 +278,26 @@ namespace OpenAIClientImpl
+@@ -1,4 +1,4 @@
+-/**
++﻿/**
+  * OpenAIClient.cpp - Implementation of OpenAI API client functionality
+  *
+  * This file handles communication with various LLM APIs and manages the
+@@ -29,20 +29,11 @@
+ #include "editor/EditorInterface.h"
+ 
+ /**
+- * Streaming API response handling
+- *
+- * The plugin supports streaming responses from LLMs, where text is returned incrementally
+- * rather than all at once. This provides a more interactive experience as the user can
+- * see the response being generated in real-time.
+- *
+- * Streaming implementation uses Windows messages to safely communicate between the
+- * background network thread and the UI thread. Each chunk of text is processed and
+- * sent via the WM_OPENAI_STREAM_CHUNK message.
++ * Stream data is buffered until the request succeeds. This keeps the selected
++ * source intact on cancellation or failure and lets reasoning tags be filtered
++ * even when the network splits a tag across chunks.
+  */
+ 
+-// define custom message for streaming chunks
+-#define WM_OPENAI_STREAM_CHUNK (WM_APP + 100)
+-
+ // Global handle to direct streaming chunks (defined in external_globals.h)
+ HWND s_streamTargetScintilla = nullptr;
+ 
+@@ -67,75 +58,39 @@ size_t OpenAIcURLCallback(void *contents, size_t size, size_t nmemb, void *userp
+ }
+ 
+ /**
+- * CURL write callback for streaming: posts each chunk to the main thread
++ * CURL write callback for streaming: buffers the raw response
+  *
+  * @param contents The received data buffer
+  * @param size Always 1
+  * @param nmemb The size of the data received
+- * @param userp User-provided pointer (window handle)
++ * @param userp User-provided pointer (std::string response buffer)
+  * @return The number of bytes processed (should match nmemb on success)
+  */
+ size_t OpenAIStreamCallback(void *contents, size_t size, size_t nmemb, void *userp)
+ {
+-    // We need to use userp to know where to send messages
+-    HWND targetWindow = static_cast<HWND>(userp);
+-    if (!targetWindow)
+-    {
+-        targetWindow = nppData._nppHandle; // Fallback to main Notepad++ window
+-    }
++    const size_t totalSize = size * nmemb;
++    auto *response = static_cast<std::string *>(userp);
++    response->append(static_cast<char *>(contents), totalSize);
++    return _loaderDlg.isCancelled() ? CURL_READFUNC_ABORT : totalSize;
++}
+ 
+-    size_t totalSize = size * nmemb;
+-    std::string chunk(static_cast<char *>(contents), totalSize);
++static std::string extractStreamContent(const std::string &wire, const std::string &apiType)
++{
+     std::string content;
+-
+-    try
+-    {
+-        // Handle streaming responses for different API formats
+-        if (!chunk.empty())
+-        {
+-            std::string apiType = toUTF8(configAPIValue_responseType);
+-            content = StreamParser::extractContent(chunk, apiType);
+-        }
+-
+-        // If we have content to display or this might be plain text (and short)
+-        if (!content.empty() || (chunk.size() < 100 && !StreamParser::isCompletionMarker(chunk)))
+-        {
+-            // If we couldn't extract content but have a small chunk, use the raw chunk
+-            if (content.empty() && chunk.size() < 100 && !StreamParser::isCompletionMarker(chunk))
+-            {
+-                content = chunk;
+-            }
+-
+-            // Only send non-empty content
+-            if (!content.empty())
+-            {
+-                // Send content directly to the Scintilla editor
+-                // This bypasses the problematic PostMessage approach
+-                if (s_streamTargetScintilla && IsWindow(s_streamTargetScintilla))
+-                {
+-                    // Use SCI_REPLACESEL to insert the content at the current position
+-                    ::SendMessage(s_streamTargetScintilla, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(content.c_str()));
+-                }
+-            }
+-        }
+-    }
+-    catch (...)
++    size_t start = 0;
++    while (start < wire.size())
+     {
+-        // Fallback for any unexpected errors - just send the raw chunk
+-        // But first check if it's a completion marker
+-        if (StreamParser::isCompletionMarker(chunk))
+-        {
+-            return totalSize;
+-        }
+-
+-        // Send content directly to the Scintilla editor (fallback path)
+-        if (s_streamTargetScintilla && IsWindow(s_streamTargetScintilla))
+-        {
+-            ::SendMessage(s_streamTargetScintilla, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(chunk.c_str()));
+-        }
++        const size_t end = wire.find('\n', start);
++        std::string line = wire.substr(start, end == std::string::npos ? end : end - start);
++        if (!line.empty() && line.back() == '\r')
++            line.pop_back();
++        if (!line.empty())
++            content += StreamParser::extractContent(line, apiType);
++        if (end == std::string::npos)
++            break;
++        start = end + 1;
+     }
+-
+-    return _loaderDlg.isCancelled() ? CURL_READFUNC_ABORT : totalSize;
++    return content;
+ }
+ 
+ /**
+@@ -197,43 +152,35 @@ namespace OpenAIClientImpl
+             return;
+         }
+ 
+-        // Get selected text
+-        std::string selectedText = EditorInterface::getSelectedText(curScintilla);
+-        if (selectedText.empty())
++        const std::string selectedText = EditorInterface::getSelectedText(curScintilla);
++        PromptCatalog catalog;
++        std::wstring catalogError;
++        if (!loadPromptCatalog(instructionsFilePath, catalog, catalogError))
+         {
+-            instructionsFileError(L"No text selected.", L"NppOpenAI Error");
++            instructionsFileError(catalogError.c_str(), L"NppOpenAI - Instructions invalides");
+             return;
+-        } // Get system prompt - handle multiple prompts case BEFORE showing loader
+-        std::wstring systemPrompt = APIUtils::getSystemPrompt();
+-
+-        // If multiple prompts are available, show selection dialog
+-        if (systemPrompt == L"MULTIPLE_PROMPTS_AVAILABLE")
++        }
++        if (catalog.prompts.empty())
+         {
+-            // Parse prompts from instructions file
+-            std::vector<Prompt> prompts;
+-            parseInstructionsFile(instructionsFilePath, prompts);
+-
+-            if (prompts.size() > 1)
+-            {
+-                // Show prompt selection dialog
+-                static int lastUsedPromptIndex = -1; // Local static variable to remember last choice
+-                int selectedPromptIndex = choosePrompt(nppData._nppHandle, prompts, lastUsedPromptIndex);
+-
+-                if (selectedPromptIndex == -1)
+-                {
+-                    // User cancelled the dialog
+-                    return;
+-                }
+-
+-                // Remember the user's choice for next time
+-                lastUsedPromptIndex = selectedPromptIndex;
+-                systemPrompt = prompts[selectedPromptIndex].content;
+-            }
+-            else
+-            {
+-                // Fallback to default if something went wrong
+-                systemPrompt = configAPIValue_instructions;
+-            }
++            instructionsFileError(L"Aucune instruction dans le fichier.", L"NppOpenAI Error");
++            return;
++        }
++        PromptChoice choice;
++        if (!choosePrompt(nppData._nppHandle, catalog, iniFilePath,
++            isKeepQuestion, configAPIValue_showReasoning == L"1", choice))
++            return;
++        if (selectedText.empty() && choice.consignes.empty())
++        {
++            instructionsFileError(L"Sélectionner du texte ou saisir une consigne.", L"NppOpenAI Error");
++            return;
++        }
++        const std::wstring systemPrompt = catalog.prompts[static_cast<size_t>(choice.promptIndex)].content;
++        std::string userText = selectedText;
++        if (!choice.consignes.empty())
++        {
++            userText = "Consignes ponctuelles :\n" + toUTF8(choice.consignes);
++            if (!selectedText.empty())
++                userText += "\n\nTexte à traiter :\n" + selectedText;
+         }
+ 
+         // NOW show the loader dialog after prompt selection is complete
+@@ -267,7 +214,7 @@ namespace OpenAIClientImpl
+ 
+         // Prepare API request with grouped options
+         std::string request = APIUtils::prepareApiRequest(
+-            selectedText,
++            userText,
+             systemPrompt,
+             configAPIValue_responseType,
+             options);
+@@ -278,9 +225,26 @@ namespace OpenAIClientImpl
          std::string chatRoute = toUTF8(configAPIValue_chatRoute);
          std::string url = APIUtils::buildApiUrl(baseUrl, chatRoute);
          */
@@ -30,10 +326,244 @@ index 569f58e..019e13d 100644
          std::string secretKey = toUTF8(configAPIValue_secretKey);
  
          std::string response;
+@@ -294,14 +258,7 @@ namespace OpenAIClientImpl
+                 ::SendMessage(nppData._nppHandle, NPPM_SETSTATUSBAR, STATUSBAR_DOC_TYPE, (LPARAM)debugMsg.c_str());
+             }
+ 
+-            // We no longer need to set s_streamTargetScintilla, the message handler gets the current Scintilla            // Prepare editor for streaming response using the proper interface
+-            EditorInterface::prepareForStreamingResponse(curScintilla, selectedText, isKeepQuestion, configAPIValue_responseType);
+-
+-            // Store the current Scintilla handle for the streaming process
+-            s_streamTargetScintilla = curScintilla; // Perform streaming request with the correct message type
+-            ok = HTTPClient::performStreamingRequest(url, request, apiType, secretKey,
+-                                                     nppData._nppHandle, // Use nppData._nppHandle as target for messages
+-                                                     WM_OPENAI_STREAM_CHUNK, proxy);
++            ok = HTTPClient::performStreamingRequest(url, request, response, apiType, secretKey, proxy);
+         }
+         else
+         {
+@@ -342,58 +299,45 @@ namespace OpenAIClientImpl
+                 instructionsFileError(errorMsg.c_str(), L"NppOpenAI Error");
+             }
+             return;
+-        } // Handle non-streaming response
+-        if (!streaming)
++        }
++        std::string extractedContent;
++        if (streaming)
++            extractedContent = extractStreamContent(response, apiType);
++        else
+         {
+-            // Parse response and extract content using the correct parser
+             auto parser = ResponseParsers::getParserForEndpoint(configAPIValue_responseType);
+-            std::string extractedContent = parser(response);
+-            if (!extractedContent.empty())
+-            {
+-                // For non-streaming with keepQuestion, mimic streaming behavior:
+-                // Keep the question in place and append the response after it
+-                if (isKeepQuestion)
+-                {
+-                    // Move cursor to end of selection (after the question)
+-                    Sci_Position selEnd = ::SendMessage(curScintilla, SCI_GETSELECTIONEND, 0, 0);
+-                    ::SendMessage(curScintilla, SCI_SETSEL, selEnd, selEnd);
+-
+-                    // Add appropriate spacing and the response after the question
+-                    std::string eolString = EditorInterface::getNewlineString(curScintilla); // Get Scintilla line ending style to determine appropriate spacing
+-                    std::string responseText;
+-                    if (configAPIValue_responseType == L"ollama")
+-                    {
+-                        responseText = eolString + extractedContent;
+-                    }
+-                    else
+-                    {
+-                        responseText = eolString + eolString + extractedContent;
+-                    }
+-
+-                    // Insert the response after the question
+-                    EditorInterface::insertTextAtCursor(curScintilla, responseText);
+-
+-                    // Debug output to verify behavior
+-                    if (debugMode)
+-                    {
+-                        std::string debugMsg = "Non-streaming: Inserted response after question (like streaming mode)";
+-                        ::SendMessage(nppData._nppHandle, NPPM_SETSTATUSBAR, STATUSBAR_DOC_TYPE, (LPARAM)debugMsg.c_str());
+-                    }
+-                }
+-                else
+-                {
+-                    // Replace the selected text entirely with the response
+-                    EditorInterface::replaceSelectedText(curScintilla, extractedContent);
+-                }
+-            }
+-            else
+-            {
+-                instructionsFileError(L"Failed to parse API response", L"NppOpenAI Error");
+-                _loaderDlg.display(false);
+-                return;
+-            }
++            extractedContent = parser(response);
++        }
++        if (extractedContent.rfind("[Error", 0) == 0 ||
++            extractedContent.rfind("[Failed to parse", 0) == 0)
++        {
++            const std::wstring error = stringToWstring(extractedContent);
++            instructionsFileError(error.c_str(), L"NppOpenAI - Réponse invalide");
++            _loaderDlg.display(false);
++            return;
+         }
+-        // For streaming mode, the text is already in the editor through the callback        // Calculate and display elapsed time
++        extractedContent = ResponseParsers::processThinkingSections(extractedContent, choice.showReasoning);
++        if (extractedContent.empty())
++        {
++            instructionsFileError(L"Réponse vide ou impossible à lire.", L"NppOpenAI Error");
++            _loaderDlg.display(false);
++            return;
++        }
++        const std::string eol = EditorInterface::getNewlineString(curScintilla);
++        if (choice.keepSelection)
++        {
++            const Sci_Position selEnd = ::SendMessage(curScintilla, SCI_GETSELECTIONEND, 0, 0);
++            ::SendMessage(curScintilla, SCI_SETSEL, selEnd, selEnd);
++            std::string insertion = eol + eol;
++            if (!choice.consignes.empty())
++                insertion += "Consigne appliquée : " + toUTF8(choice.consignes) + eol + eol;
++            insertion += extractedContent;
++            EditorInterface::insertTextAtCursor(curScintilla, insertion);
++        }
++        else
++            EditorInterface::replaceSelectedText(curScintilla, extractedContent);
++
++        // Calculate and display elapsed time
+         auto endTime = std::chrono::high_resolution_clock::now();
+         auto elapsedMilliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+         double elapsedSeconds = elapsedMilliseconds / 1000.0;
+diff --git a/src/api/OpenAIClient.h b/src/api/OpenAIClient.h
+index ef3440a..4148210 100644
+--- a/src/api/OpenAIClient.h
++++ b/src/api/OpenAIClient.h
+@@ -56,7 +56,7 @@ size_t OpenAIcURLCallback(void *contents, size_t size, size_t nmemb, void *userp
+  * @param contents Pointer to the response data buffer
+  * @param size Always 1
+  * @param nmemb Number of bytes in the data buffer
+- * @param userp User-provided pointer (window handle)
++ * @param userp User-provided pointer (std::string response buffer)
+  * @return Number of bytes processed
+  */
+ size_t OpenAIStreamCallback(void *contents, size_t size, size_t nmemb, void *userp);
+diff --git a/src/api/ResponseParsers.cpp b/src/api/ResponseParsers.cpp
+index 2b615e2..217693f 100644
+--- a/src/api/ResponseParsers.cpp
++++ b/src/api/ResponseParsers.cpp
+@@ -17,7 +17,6 @@
+ 
+ #include "ResponseParsers.h"
+ #include "utils/EncodingUtils.h" // for multiByteToWideChar
+-#include "external_globals.h"    // for configAPIValue_showReasoning
+ #include <string>
+ #include <stdexcept>
+ 
+@@ -32,8 +31,6 @@ namespace ResponseParsers
+             if (respJson.contains("choices") && respJson["choices"].is_array() && !respJson["choices"].empty())
+             {
+                 replyText = respJson["choices"][0]["message"]["content"].get<std::string>();
+-                // Process any thinking sections in the response
+-                replyText = processThinkingSections(replyText);
+             }
+             else
+             {
+@@ -75,8 +72,6 @@ namespace ResponseParsers
+                     if (respJson.contains("response"))
+                     {
+                         replyText = respJson["response"].get<std::string>();
+-                        // Process any thinking sections in the response
+-                        replyText = processThinkingSections(replyText);
+                     }
+                 }
+                 else
+@@ -90,8 +85,6 @@ namespace ResponseParsers
+                 if (respJson.contains("response"))
+                 {
+                     replyText = respJson["response"].get<std::string>();
+-                    // Process any thinking sections in the response
+-                    replyText = processThinkingSections(replyText);
+                 }
+                 else if (respJson.contains("error"))
+                 {
+@@ -142,8 +135,6 @@ namespace ResponseParsers
+                 }
+                 else
+                 {
+-                    // Process any thinking sections in the response
+-                    replyText = processThinkingSections(replyText);
+                 }
+             }
+             else
+@@ -189,8 +180,6 @@ namespace ResponseParsers
+                 return replyText; // Return early to skip processing non-existent text
+             }
+ 
+-            // Process any thinking sections in the response
+-            replyText = processThinkingSections(replyText);
+         }
+         catch (const std::exception &e)
+         {
+@@ -235,17 +224,14 @@ namespace ResponseParsers
+        * If show_reasoning=1 is set in the INI file, these sections are preserved.
+        * If show_reasoning=0 (default), these sections are removed from the final output.
+        *
+-       * For streaming responses, this is applied to each chunk as it arrives, which means that
+-       * thinking sections split across multiple chunks might only be partially removed.
++       * Streaming fragments are assembled before this filter runs, so tags split
++       * across network chunks are handled consistently.
+        *
+        * @param text The input text potentially containing thinking sections
+        * @return The text with thinking sections either preserved or removed
+        */
+-    std::string processThinkingSections(const std::string &text)
++    std::string processThinkingSections(const std::string &text, bool showReasoning)
+     {
+-        // Check if we should show reasoning sections
+-        bool showReasoning = (configAPIValue_showReasoning == L"1");
+-
+         if (showReasoning)
+         {
+             // Return the text as-is if we're showing reasoning
+@@ -269,7 +255,8 @@ namespace ResponseParsers
+             }
+             else
+             {
+-                // If closing tag is not found, break to avoid infinite loop
++                // An incomplete reasoning block must not leak into the document.
++                result.erase(thinkStart);
+                 break;
+             }
+         }
+diff --git a/src/api/ResponseParsers.h b/src/api/ResponseParsers.h
+index 7fda75a..b5fe2e2 100644
+--- a/src/api/ResponseParsers.h
++++ b/src/api/ResponseParsers.h
+@@ -52,7 +52,7 @@ namespace ResponseParsers
+      * @param text The text to process
+      * @return The processed text with thinking sections handled according to config
+      */
+-    std::string processThinkingSections(const std::string &text);
++    std::string processThinkingSections(const std::string &text, bool showReasoning);
+ }
+ 
+ #endif // RESPONSE_PARSERS_H
 diff --git a/src/config/ConfigManager.cpp b/src/config/ConfigManager.cpp
-index de8df56..6d8aa4a 100644
+index de8df56..bae465b 100644
 --- a/src/config/ConfigManager.cpp
 +++ b/src/config/ConfigManager.cpp
+@@ -76,7 +76,7 @@ void writeDefaultConfig()
+ 
+     // Create plugin section with default values
+     ::WritePrivateProfileString(TEXT("PLUGIN"), TEXT("total_tokens_used"), TEXT("0"), iniFilePath);
+-    ::WritePrivateProfileString(TEXT("PLUGIN"), TEXT("keep_question"), TEXT("1"), iniFilePath);
++    ::WritePrivateProfileString(TEXT("PLUGIN"), TEXT("keep_question"), TEXT("0"), iniFilePath);
+     ::WritePrivateProfileString(TEXT("PLUGIN"), TEXT("is_chat"), TEXT("0"), iniFilePath);
+     ::WritePrivateProfileString(TEXT("PLUGIN"), TEXT("chat_limit"), TEXT("10"), iniFilePath);
+ }
 @@ -207,6 +207,19 @@ namespace ConfigManagerImpl
  
          ::GetPrivateProfileString(TEXT("API"), TEXT("model"), configAPIValue_model.c_str(), buffer, 1024, iniFilePath);
@@ -54,140 +584,1289 @@ index de8df56..6d8aa4a 100644
  
          ::GetPrivateProfileString(TEXT("API"), TEXT("temperature"), configAPIValue_temperature.c_str(), buffer, 1024, iniFilePath);
          configAPIValue_temperature = buffer;
+@@ -231,6 +244,8 @@ namespace ConfigManagerImpl
+         // Load show_reasoning option
+         ::GetPrivateProfileString(TEXT("API"), TEXT("show_reasoning"), configAPIValue_showReasoning.c_str(), buffer, 1024, iniFilePath);
+         configAPIValue_showReasoning = buffer;
++        ::GetPrivateProfileString(TEXT("PLUGIN"), TEXT("show_reasoning"), configAPIValue_showReasoning.c_str(), buffer, 1024, iniFilePath);
++        configAPIValue_showReasoning = buffer;
+ 
+         // Read plugin settings if requested
+         if (loadPluginSettings)
+diff --git a/src/config/InstructionCatalog.cpp b/src/config/InstructionCatalog.cpp
+new file mode 100644
+index 0000000..87eedce
+--- /dev/null
++++ b/src/config/InstructionCatalog.cpp
+@@ -0,0 +1,566 @@
++﻿#include "PromptManager.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <cwctype>
++#include <map>
++#include <set>
++
++namespace
++{
++struct Block
++{
++    std::wstring type;
++    std::wstring id;
++    std::wstring text;
++    size_t line = 0;
++};
++
++std::wstring trim(const std::wstring &value)
++{
++    const size_t start = value.find_first_not_of(L" \t\r\n");
++    if (start == std::wstring::npos)
++        return L"";
++    const size_t end = value.find_last_not_of(L" \t\r\n");
++    return value.substr(start, end - start + 1);
++}
++
++std::wstring lower(const std::wstring &value)
++{
++    std::wstring result = value;
++    std::transform(result.begin(), result.end(), result.begin(),
++        [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
++    return result;
++}
++
++std::wstring lineError(size_t line, const std::wstring &message)
++{
++    return L"Ligne " + std::to_wstring(line) + L" : " + message;
++}
++
++bool validId(const std::wstring &id)
++{
++    if (id.empty())
++        return false;
++    for (wchar_t c : id)
++    {
++        if (!((c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') ||
++              (c >= L'0' && c <= L'9') || c == L'_' || c == L'-' || c == L'.'))
++            return false;
++    }
++    return true;
++}
++
++bool readText(const WCHAR *path, std::wstring &result, std::wstring &error)
++{
++    FILE *file = nullptr;
++    if (_wfopen_s(&file, path, L"rb") != 0 || !file)
++    {
++        error = L"Impossible d'ouvrir le fichier d'instructions.";
++        return false;
++    }
++    fseek(file, 0, SEEK_END);
++    const long length = ftell(file);
++    rewind(file);
++    if (length < 0 || length > 4 * 1024 * 1024)
++    {
++        fclose(file);
++        error = L"Le fichier d'instructions est trop volumineux.";
++        return false;
++    }
++    std::string bytes(static_cast<size_t>(length), '\0');
++    const size_t read = bytes.empty() ? 0 : fread(&bytes[0], 1, bytes.size(), file);
++    fclose(file);
++    if (read != bytes.size())
++    {
++        error = L"Lecture incomplete du fichier d'instructions.";
++        return false;
++    }
++    if (bytes.size() >= 2 &&
++        ((static_cast<unsigned char>(bytes[0]) == 0xff && static_cast<unsigned char>(bytes[1]) == 0xfe) ||
++         (static_cast<unsigned char>(bytes[0]) == 0xfe && static_cast<unsigned char>(bytes[1]) == 0xff)))
++    {
++        if ((bytes.size() - 2) % 2 != 0)
++        {
++            error = L"Fichier UTF-16 incomplet.";
++            return false;
++        }
++        const bool little = static_cast<unsigned char>(bytes[0]) == 0xff;
++        for (size_t i = 2; i < bytes.size(); i += 2)
++        {
++            const unsigned char a = static_cast<unsigned char>(bytes[i]);
++            const unsigned char b = static_cast<unsigned char>(bytes[i + 1]);
++            result.push_back(static_cast<wchar_t>(little ? a | (b << 8) : b | (a << 8)));
++        }
++        return true;
++    }
++    const size_t offset = bytes.size() >= 3 &&
++        static_cast<unsigned char>(bytes[0]) == 0xef &&
++        static_cast<unsigned char>(bytes[1]) == 0xbb &&
++        static_cast<unsigned char>(bytes[2]) == 0xbf ? 3 : 0;
++    if (bytes.size() == offset)
++        return true;
++    const int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
++        bytes.data() + offset, static_cast<int>(bytes.size() - offset), nullptr, 0);
++    if (count <= 0)
++    {
++        error = L"Encodage invalide : utiliser UTF-8 ou UTF-16.";
++        return false;
++    }
++    result.resize(static_cast<size_t>(count));
++    MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + offset,
++        static_cast<int>(bytes.size() - offset), &result[0], count);
++    return true;
++}
++
++std::vector<std::wstring> splitLines(const std::wstring &text)
++{
++    std::vector<std::wstring> lines;
++    size_t start = 0;
++    while (start < text.size())
++    {
++        const size_t end = text.find(L'\n', start);
++        std::wstring line = text.substr(start, end == std::wstring::npos ? end : end - start);
++        if (!line.empty() && line.back() == L'\r')
++            line.pop_back();
++        lines.push_back(line);
++        if (end == std::wstring::npos)
++            break;
++        start = end + 1;
++    }
++    return lines;
++}
++
++bool parseHeader(const std::wstring &line, std::wstring &type, std::wstring &id)
++{
++    if (line.size() < 3 || line.front() != L'[' || line.back() != L']')
++        return false;
++    const std::wstring inside = line.substr(1, line.size() - 2);
++    const size_t colon = inside.find(L':');
++    type = colon == std::wstring::npos ? inside : inside.substr(0, colon);
++    id = colon == std::wstring::npos ? L"" : inside.substr(colon + 1);
++    return type == L"Info" || type == L"Global" || type == L"Menu" ||
++        type == L"PlaceHolder" || type == L"Instruction" || type == L"Prompt";
++}
++
++std::wstring plainLabel(const std::wstring &label)
++{
++    std::wstring result;
++    for (size_t i = 0; i < label.size(); ++i)
++    {
++        if (label[i] == L'&')
++        {
++            if (i + 1 < label.size() && label[i + 1] == L'&')
++            {
++                result += L'&';
++                ++i;
++            }
++        }
++        else
++            result += label[i];
++    }
++    return result;
++}
++
++bool expand(const std::wstring &source, const std::map<std::wstring, std::wstring> &placeholders,
++    size_t line, std::wstring &output, std::wstring &error)
++{
++    size_t pos = 0;
++    while (pos < source.size())
++    {
++        const size_t open = source.find(L"{{", pos);
++        if (open == std::wstring::npos)
++        {
++            output += source.substr(pos);
++            break;
++        }
++        output += source.substr(pos, open - pos);
++        const size_t close = source.find(L"}}", open + 2);
++        if (close == std::wstring::npos)
++        {
++            error = lineError(line, L"placeholder non termine.");
++            return false;
++        }
++        const std::wstring id = lower(trim(source.substr(open + 2, close - open - 2)));
++        const auto found = placeholders.find(id);
++        if (found == placeholders.end())
++        {
++            error = lineError(line, L"placeholder inconnu : " + id);
++            return false;
++        }
++        output += found->second;
++        pos = close + 2;
++    }
++    return true;
++}
++
++bool addMenuItem(std::vector<PromptMenuItem> &siblings, const PromptMenuItem &item,
++    size_t line, std::wstring &error)
++{
++    const std::wstring label = lower(plainLabel(item.label));
++    if (label.empty())
++    {
++        error = lineError(line, L"libelle de menu vide.");
++        return false;
++    }
++    for (const auto &existing : siblings)
++    {
++        if (lower(plainLabel(existing.label)) == label)
++        {
++            error = lineError(line, L"libelle de menu repete au meme niveau : " + label);
++            return false;
++        }
++    }
++    wchar_t mnemonic = 0;
++    for (size_t i = 0; i < item.label.size(); ++i)
++    {
++        if (item.label[i] != L'&')
++            continue;
++        if (i + 1 >= item.label.size())
++        {
++            error = lineError(line, L"esperluette finale dans un libelle de menu.");
++            return false;
++        }
++        if (item.label[i + 1] == L'&')
++        {
++            ++i;
++            continue;
++        }
++        if (mnemonic != 0)
++        {
++            error = lineError(line, L"plusieurs touches d'acces dans un meme libelle.");
++            return false;
++        }
++        mnemonic = static_cast<wchar_t>(std::towlower(item.label[++i]));
++    }
++    if (mnemonic != 0)
++    {
++        for (const auto &existing : siblings)
++        {
++            for (size_t i = 0; i + 1 < existing.label.size(); ++i)
++            {
++                if (existing.label[i] == L'&' && existing.label[i + 1] != L'&' &&
++                    std::towlower(existing.label[i + 1]) == mnemonic)
++                {
++                    error = lineError(line, L"touche d'acces repetee au meme niveau.");
++                    return false;
++                }
++                if (existing.label[i] == L'&')
++                    ++i;
++            }
++        }
++    }
++    siblings.push_back(item);
++    return true;
++}
++
++bool parseMenu(const Block &block, PromptCatalog &catalog, std::wstring &error)
++{
++    const auto lines = splitLines(block.text);
++    size_t rootIndex = 0;
++    size_t childIndex = 0;
++    int previousDepth = -1;
++    for (size_t n = 0; n < lines.size(); ++n)
++    {
++        const std::wstring &line = lines[n];
++        if (trim(line).empty() || trim(line).front() == L';')
++            continue;
++        size_t spaces = 0;
++        while (spaces < line.size() && line[spaces] == L' ')
++            ++spaces;
++        if (spaces < line.size() && line[spaces] == L'\t')
++        {
++            error = lineError(block.line + n + 1, L"les tabulations sont interdites dans Menu.");
++            return false;
++        }
++        if (spaces % 2 != 0 || spaces > 4)
++        {
++            error = lineError(block.line + n + 1, L"indentation de Menu invalide (0, 2 ou 4 espaces).");
++            return false;
++        }
++        const int depth = static_cast<int>(spaces / 2);
++        if (depth > previousDepth + 1)
++        {
++            error = lineError(block.line + n + 1, L"niveau de menu sans parent.");
++            return false;
++        }
++        const std::wstring content = trim(line.substr(spaces));
++        const size_t equals = content.find(L'=');
++        PromptMenuItem item;
++        item.label = trim(content.substr(0, equals));
++        item.line = block.line + n + 1;
++        if (equals != std::wstring::npos)
++            item.promptId = trim(content.substr(equals + 1));
++        if (depth == 0 && !item.promptId.empty())
++        {
++            error = lineError(block.line + n + 1, L"la racine doit etre un menu, pas une instruction.");
++            return false;
++        }
++        if (depth == 2 && item.promptId.empty())
++        {
++            error = lineError(block.line + n + 1, L"le troisieme niveau doit etre une instruction.");
++            return false;
++        }
++        if (equals != std::wstring::npos && (!validId(item.promptId) || item.label.empty()))
++        {
++            error = lineError(block.line + n + 1, L"feuille de menu invalide.");
++            return false;
++        }
++        if (depth == 0)
++        {
++            if (!addMenuItem(catalog.menu, item, block.line + n + 1, error))
++                return false;
++            rootIndex = catalog.menu.size() - 1;
++        }
++        else if (depth == 1)
++        {
++            if (!catalog.menu[rootIndex].promptId.empty())
++            {
++                error = lineError(item.line, L"une instruction ne peut avoir de sous-menu.");
++                return false;
++            }
++            if (!addMenuItem(catalog.menu[rootIndex].children, item, item.line, error))
++                return false;
++            childIndex = catalog.menu[rootIndex].children.size() - 1;
++        }
++        else
++        {
++            auto &parent = catalog.menu[rootIndex].children[childIndex];
++            if (!parent.promptId.empty())
++            {
++                error = lineError(block.line + n + 1, L"une instruction ne peut avoir de sous-menu.");
++                return false;
++            }
++            if (!addMenuItem(parent.children, item, block.line + n + 1, error))
++                return false;
++        }
++        previousDepth = depth;
++    }
++    if (catalog.menu.empty())
++    {
++        error = lineError(block.line, L"menu vide.");
++        return false;
++    }
++    return true;
++}
++
++bool resolveMenu(std::vector<PromptMenuItem> &items, PromptCatalog &catalog,
++    const std::map<std::wstring, size_t> &ids, const std::wstring &parent, std::wstring &error)
++{
++    for (auto &item : items)
++    {
++        const std::wstring label = plainLabel(item.label);
++        const std::wstring path = parent.empty() ? label : parent + L" > " + label;
++        if (item.promptId.empty())
++        {
++            if (item.children.empty())
++            {
++                error = lineError(item.line, L"Menu sans instruction : " + path);
++                return false;
++            }
++            if (!resolveMenu(item.children, catalog, ids, path, error))
++                return false;
++        }
++        else
++        {
++            const auto found = ids.find(lower(item.promptId));
++            if (found == ids.end())
++            {
++                error = lineError(item.line, L"Instruction introuvable dans Menu : " + item.promptId);
++                return false;
++            }
++            Prompt &prompt = catalog.prompts[found->second];
++            if (prompt.searchPaths.empty())
++                prompt.name = label;
++            prompt.searchPaths.push_back(path);
++        }
++    }
++    return true;
++}
++}
++
++bool loadPromptCatalog(const WCHAR *filePath, PromptCatalog &catalog, std::wstring &error)
++{
++    catalog = PromptCatalog();
++    error.clear();
++    if (GetFileAttributesW(filePath) == INVALID_FILE_ATTRIBUTES)
++        return true;
++    std::wstring text;
++    if (!readText(filePath, text, error))
++        return false;
++    const auto lines = splitLines(text);
++    std::vector<Block> blocks;
++    Block current;
++    std::wstring preamble;
++    for (size_t n = 0; n < lines.size(); ++n)
++    {
++        std::wstring type, id;
++        if (lines[n].size() >= 2 && lines[n].front() == L'[' && lines[n].back() == L']' &&
++            !parseHeader(lines[n], type, id))
++        {
++            error = lineError(n + 1, L"section inconnue : " + lines[n]);
++            return false;
++        }
++        if (parseHeader(lines[n], type, id))
++        {
++            if (!current.type.empty())
++                blocks.push_back(current);
++            current = Block();
++            current.type = type;
++            current.id = trim(id);
++            current.line = n + 1;
++            if (type == L"Info" || type == L"PlaceHolder" || type == L"Instruction" || type == L"Menu")
++                catalog.modernFormat = true;
++        }
++        else if (current.type.empty())
++            preamble += lines[n] + L"\n";
++        else
++            current.text += lines[n] + L"\n";
++    }
++    if (!current.type.empty())
++        blocks.push_back(current);
++
++    if (!catalog.modernFormat)
++    {
++        std::wstring global;
++        for (const auto &block : blocks)
++        {
++            if (block.type == L"Global")
++                global += block.text;
++            else if (block.type == L"Prompt")
++            {
++                Prompt prompt;
++                prompt.id = block.id;
++                prompt.name = block.id.empty() ? L"(defaut)" : block.id;
++                prompt.content = block.text;
++                catalog.prompts.push_back(prompt);
++            }
++        }
++        if (blocks.empty() && !trim(preamble).empty())
++        {
++            Prompt prompt;
++            prompt.id = L"default";
++            prompt.name = L"Instruction par defaut";
++            prompt.content = preamble;
++            catalog.prompts.push_back(prompt);
++        }
++        if (catalog.prompts.empty() && !trim(global).empty())
++        {
++            Prompt prompt;
++            prompt.id = L"default";
++            prompt.name = L"Instruction par defaut";
++            catalog.prompts.push_back(prompt);
++        }
++        for (auto &prompt : catalog.prompts)
++            prompt.content = global + L"\n" + prompt.content;
++        if (!catalog.prompts.empty())
++        {
++            PromptMenuItem root;
++            root.label = L"&Instructions";
++            for (const auto &prompt : catalog.prompts)
++            {
++                PromptMenuItem leaf;
++                leaf.label = prompt.name;
++                leaf.promptId = prompt.id;
++                root.children.push_back(leaf);
++            }
++            catalog.menu.push_back(root);
++        }
++        return true;
++    }
++
++    std::map<std::wstring, std::wstring> placeholders;
++    std::map<std::wstring, size_t> ids;
++    std::wstring global;
++    bool seenGlobal = false;
++    size_t globalLine = 0;
++    const Block *menu = nullptr;
++    for (const auto &block : blocks)
++    {
++        if (block.type == L"Prompt")
++        {
++            error = lineError(block.line, L"ne pas melanger [Prompt:] et le nouveau format.");
++            return false;
++        }
++        if (block.type == L"Info")
++            continue;
++        if (block.type == L"Global")
++        {
++            if (seenGlobal)
++            {
++                error = lineError(block.line, L"section [Global] repetee.");
++                return false;
++            }
++            seenGlobal = true;
++            global = block.text;
++            globalLine = block.line;
++        }
++        else if (block.type == L"PlaceHolder")
++        {
++            if (!validId(block.id) || trim(block.text).empty())
++            {
++                error = lineError(block.line, L"PlaceHolder sans identifiant ou contenu valide.");
++                return false;
++            }
++            const std::wstring key = lower(block.id);
++            if (placeholders.count(key) || block.text.find(L"{{") != std::wstring::npos)
++            {
++                error = lineError(block.line, L"PlaceHolder repete ou imbrique : " + block.id);
++                return false;
++            }
++            placeholders[key] = block.text;
++        }
++        else if (block.type == L"Instruction")
++        {
++            if (!validId(block.id) || trim(block.text).empty() || ids.count(lower(block.id)))
++            {
++                error = lineError(block.line, L"Instruction vide ou identifiant invalide/repete : " + block.id);
++                return false;
++            }
++            Prompt prompt;
++            prompt.id = block.id;
++            prompt.name = block.id;
++            prompt.content = block.text;
++            prompt.sourceLine = block.line;
++            ids[lower(block.id)] = catalog.prompts.size();
++            catalog.prompts.push_back(prompt);
++        }
++        else if (block.type == L"Menu")
++        {
++            if (menu)
++            {
++                error = lineError(block.line, L"section [Menu] repetee.");
++                return false;
++            }
++            menu = &block;
++        }
++    }
++    if (catalog.prompts.empty() || !menu)
++    {
++        error = L"Le nouveau format exige au moins une [Instruction:...] et une section [Menu].";
++        return false;
++    }
++    std::wstring expandedGlobal;
++    if (!expand(global, placeholders, globalLine, expandedGlobal, error))
++        return false;
++    for (auto &prompt : catalog.prompts)
++    {
++        std::wstring expanded;
++        if (!expand(prompt.content, placeholders, prompt.sourceLine, expanded, error))
++            return false;
++        prompt.content = expandedGlobal + (expandedGlobal.empty() ? L"" : L"\n") + expanded;
++    }
++    if (!parseMenu(*menu, catalog, error))
++        return false;
++    if (!resolveMenu(catalog.menu, catalog, ids, L"", error))
++        return false;
++    return true;
++}
++
++void parseInstructionsFile(const WCHAR *filePath, std::vector<Prompt> &prompts)
++{
++    PromptCatalog catalog;
++    std::wstring error;
++    if (loadPromptCatalog(filePath, catalog, error))
++        prompts = catalog.prompts;
++}
 diff --git a/src/config/PromptChooser.rc b/src/config/PromptChooser.rc
 new file mode 100644
-index 0000000..2d3fd68
+index 0000000..81527ce
 --- /dev/null
 +++ b/src/config/PromptChooser.rc
-@@ -0,0 +1,19 @@
+@@ -0,0 +1,22 @@
 +#include <windows.h>
 +#include "PromptChooserResource.h"
++#pragma code_page(65001)
 +
-+IDD_PROMPT_CHOOSER DIALOGEX 0, 0, 340, 278
-+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
++IDD_PROMPT_CHOOSER DIALOGEX 0, 0, 440, 315
++STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME
 +CAPTION "NppOpenAI - Choisir une instruction"
 +FONT 9, "Segoe UI"
 +BEGIN
-+    LTEXT       "Filtrer par nom :", -1, 8, 9, 85, 11
-+    EDITTEXT    IDC_PROMPT_FILTER, 8, 22, 324, 15, ES_AUTOHSCROLL | WS_TABSTOP
-+    PUSHBUTTON  "&Tous", IDC_PROMPT_ALL, 8, 43, 56, 16, WS_TABSTOP
-+    PUSHBUTTON  "&Edition", IDC_PROMPT_EDIT, 75, 43, 56, 16, WS_TABSTOP
-+    PUSHBUTTON  "T&onalite", IDC_PROMPT_TONE, 142, 43, 56, 16, WS_TABSTOP
-+    PUSHBUTTON  "&Format", IDC_PROMPT_FORMAT, 209, 43, 56, 16, WS_TABSTOP
-+    PUSHBUTTON  "&Commandes", IDC_PROMPT_COMMAND, 276, 43, 56, 16, WS_TABSTOP
-+    LISTBOX     IDC_PROMPT_LIST, 8, 65, 324, 178, LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP
-+    DEFPUSHBUTTON "&Valider", IDOK, 224, 251, 52, 17, WS_TABSTOP
-+    PUSHBUTTON  "Annuler", IDCANCEL, 280, 251, 52, 17, WS_TABSTOP
++    LTEXT       "Consignes :", IDC_PROMPT_CONSIGNES_LABEL, 8, 8, 180, 11
++    EDITTEXT    IDC_PROMPT_CONSIGNES, 8, 20, 424, 38, ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL | WS_TABSTOP
++    LTEXT       "Nom de l'instruction :", IDC_PROMPT_NAME_LABEL, 8, 65, 180, 11
++    EDITTEXT    IDC_PROMPT_NAME, 8, 77, 424, 17, ES_AUTOHSCROLL | WS_TABSTOP
++    LISTBOX     IDC_PROMPT_SUGGEST, 8, 94, 424, 68, LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP
++    LTEXT       "Saisir un nom ou choisir un menu.", IDC_PROMPT_HINT, 8, 98, 424, 11
++    LTEXT       "Instructions récentes (1 à 5)", IDC_PROMPT_RECENT_LABEL, 8, 102, 220, 11
++    LISTBOX     IDC_PROMPT_RECENTS, 8, 115, 424, 88, LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP
++    CONTROL     "Conserver la sélection et la consigne (8)", IDC_PROMPT_KEEP, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 8, 216, 280, 15
++    CONTROL     "Afficher le raisonnement (9)", IDC_PROMPT_REASONING, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 8, 233, 280, 15
++    DEFPUSHBUTTON "Valider", IDOK, 314, 288, 55, 18, WS_TABSTOP
++    PUSHBUTTON  "Annuler", IDCANCEL, 377, 288, 55, 18, WS_TABSTOP
 +END
 diff --git a/src/config/PromptChooserResource.h b/src/config/PromptChooserResource.h
 new file mode 100644
-index 0000000..dc65b60
+index 0000000..0335f88
 --- /dev/null
 +++ b/src/config/PromptChooserResource.h
-@@ -0,0 +1,10 @@
+@@ -0,0 +1,15 @@
 +#pragma once
 +
 +#define IDD_PROMPT_CHOOSER 3100
-+#define IDC_PROMPT_FILTER 3101
-+#define IDC_PROMPT_LIST 3102
-+#define IDC_PROMPT_ALL 3103
-+#define IDC_PROMPT_EDIT 3104
-+#define IDC_PROMPT_TONE 3105
-+#define IDC_PROMPT_FORMAT 3106
-+#define IDC_PROMPT_COMMAND 3107
++#define IDC_PROMPT_CONSIGNES 3101
++#define IDC_PROMPT_NAME 3102
++#define IDC_PROMPT_SUGGEST 3103
++#define IDC_PROMPT_RECENTS 3104
++#define IDC_PROMPT_KEEP 3105
++#define IDC_PROMPT_REASONING 3106
++#define IDC_PROMPT_RECENT_LABEL 3107
++#define IDC_PROMPT_NAME_LABEL 3108
++#define IDC_PROMPT_CONSIGNES_LABEL 3109
++#define IDC_PROMPT_HINT 3110
++
++#define ID_PROMPT_MENU_FIRST 40000
 diff --git a/src/config/PromptManager.cpp b/src/config/PromptManager.cpp
-index 3cd206e..78be5ff 100644
+index 3cd206e..55e1a01 100644
 --- a/src/config/PromptManager.cpp
 +++ b/src/config/PromptManager.cpp
-@@ -2,23 +2,27 @@
-  * PromptManager.cpp - System prompt management functionality
-  *
-  * This file handles reading, parsing, and presenting system prompts that can be
+@@ -1,138 +1,642 @@
+-/**
+- * PromptManager.cpp - System prompt management functionality
+- *
+- * This file handles reading, parsing, and presenting system prompts that can be
 - * used as instructions for AI requests. It supports multiple named prompts in an
 - * INI-style format and provides a UI for users to select which prompt to use.
-+ * used as instructions for AI requests. It supports a shared [Global] section,
-+ * multiple named prompts, and a searchable selection dialog.
-  */
- 
- #include <windows.h>
+- */
+-
+-#include <windows.h>
 -#include <commctrl.h> // for TASKDIALOG_BUTTON, TaskDialogIndirect
 -#pragma comment(lib, "comctl32.lib")
 -
- #include "PromptManager.h"
+-#include "PromptManager.h"
+-#include <fstream>
+-#include <regex>
+-#include <cstdio>
+-
+-/**
+- * Parses the instructions file containing system prompts
+- *
+- * The file can contain multiple prompts in INI-style format:
+- * [Prompt:name]
+- * Prompt content here...
+- *
+- * If no section headers are found, the entire file content is treated as a single prompt.
+- *
+- * @param filePath Path to the instructions/prompts file
+- * @param prompts Output vector that will be filled with parsed prompts
+- */
+-void parseInstructionsFile(const WCHAR *filePath, std::vector<Prompt> &prompts)
+-{
+-    FILE *file = _wfopen(filePath, L"r, ccs=UNICODE");
+-    if (!file)
++﻿#include "PromptManager.h"
 +#include "PromptChooserResource.h"
- #include <fstream>
- #include <regex>
- #include <cstdio>
++
 +#include <algorithm>
 +#include <cwctype>
++#include <map>
++#include <set>
++
++#ifndef EM_SETCUEBANNER
++#define EM_SETCUEBANNER 0x1501
++#endif
 +
 +extern HANDLE _hModule;
++
++namespace
++{
++struct PromptChooserState
++{
++    const PromptCatalog *catalog = nullptr;
++    const WCHAR *iniPath = nullptr;
++    PromptChoice *choice = nullptr;
++    std::vector<int> recents;
++    std::vector<int> suggestions;
++    std::map<UINT, int> menuCommands;
++    HMENU menu = nullptr;
++    WNDPROC oldNameProc = nullptr;
++    WNDPROC oldSuggestProc = nullptr;
++    int selectedPrompt = -1;
++    bool settingName = false;
++    bool initialized = false;
++};
++
++int scaled(HWND window, int value)
++{
++    return MulDiv(value, static_cast<int>(GetDpiForWindow(window)), 96);
++}
++
++std::wstring windowText(HWND window)
++{
++    const int length = GetWindowTextLengthW(window);
++    std::wstring result(static_cast<size_t>(length) + 1, L'\0');
++    GetWindowTextW(window, &result[0], length + 1);
++    result.resize(static_cast<size_t>(length));
++    return result;
++}
++
++std::wstring lower(const std::wstring &value)
++{
++    std::wstring result = value;
++    std::transform(result.begin(), result.end(), result.begin(),
++        [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
++    return result;
++}
++
++std::wstring fold(const std::wstring &value)
++{
++    if (value.empty())
++        return L"";
++    const int count = FoldStringW(MAP_COMPOSITE, value.c_str(), static_cast<int>(value.size()), nullptr, 0);
++    if (count <= 0)
++        return lower(value);
++    std::wstring decomposed(static_cast<size_t>(count), L'\0');
++    FoldStringW(MAP_COMPOSITE, value.c_str(), static_cast<int>(value.size()), &decomposed[0], count);
++    std::wstring result;
++    for (wchar_t c : decomposed)
++    {
++        if (c < 0x0300 || c > 0x036f)
++            result += static_cast<wchar_t>(std::towlower(c));
++    }
++    return result;
++}
++
++bool matches(const Prompt &prompt, const std::wstring &query)
++{
++    if (fold(prompt.name).find(query) != std::wstring::npos ||
++        fold(prompt.id).find(query) != std::wstring::npos)
++        return true;
++    for (const auto &path : prompt.searchPaths)
++    {
++        if (fold(path).find(query) != std::wstring::npos)
++            return true;
++    }
++    return false;
++}
++
++int findPrompt(const PromptCatalog &catalog, const std::wstring &id)
++{
++    for (size_t i = 0; i < catalog.prompts.size(); ++i)
++    {
++        if (lower(catalog.prompts[i].id) == lower(id))
++            return static_cast<int>(i);
++    }
++    return -1;
++}
++
++std::wstring displayName(const PromptCatalog &catalog, int index)
++{
++    const Prompt &prompt = catalog.prompts[static_cast<size_t>(index)];
++    for (size_t i = 0; i < catalog.prompts.size(); ++i)
++    {
++        if (static_cast<int>(i) != index && lower(catalog.prompts[i].name) == lower(prompt.name))
++            return prompt.name + L"  —  " + (prompt.searchPaths.empty() ? prompt.id : prompt.searchPaths.front());
++    }
++    return prompt.name;
++}
++
++void fillName(HWND dialog, PromptChooserState *state, int index)
++{
++    if (index < 0 || index >= static_cast<int>(state->catalog->prompts.size()))
+         return;
++    state->settingName = true;
++    state->selectedPrompt = index;
++    SetDlgItemTextW(dialog, IDC_PROMPT_NAME, state->catalog->prompts[static_cast<size_t>(index)].name.c_str());
++    state->settingName = false;
++    ShowWindow(GetDlgItem(dialog, IDC_PROMPT_SUGGEST), SW_HIDE);
++    SetDlgItemTextW(dialog, IDC_PROMPT_HINT, L"Instruction prête. Entrée pour valider.");
++    HWND edit = GetDlgItem(dialog, IDC_PROMPT_NAME);
++    SetFocus(edit);
++    SendMessageW(edit, EM_SETSEL, 0, -1);
++}
++
++void loadRecents(PromptChooserState *state)
++{
++    for (int n = 1; n <= 5; ++n)
++    {
++        wchar_t key[4] = {};
++        wchar_t id[256] = {};
++        wsprintfW(key, L"%d", n);
++        GetPrivateProfileStringW(L"RECENTS", key, L"", id, 256, state->iniPath);
++        const int index = findPrompt(*state->catalog, id);
++        if (index >= 0 && std::find(state->recents.begin(), state->recents.end(), index) == state->recents.end())
++            state->recents.push_back(index);
++    }
++}
  
- /**
-  * Parses the instructions file containing system prompts
-  *
-  * The file can contain multiple prompts in INI-style format:
-+ * [Global]
-+ * Shared instructions for all named prompts.
-  * [Prompt:name]
-  * Prompt content here...
-  *
-@@ -39,6 +43,8 @@ void parseInstructionsFile(const WCHAR *filePath, std::vector<Prompt> &prompts)
-     std::wsmatch match;
-     Prompt current;
-     bool hasHeader = false;
-+    bool inGlobalSection = false;
-+    std::wstring globalContent;
+-    std::wstring line;
+-    WCHAR buffer[4096];
+-    std::wregex headerPattern(LR"(^\[Prompt:([^\]]+)\])");
+-    std::wsmatch match;
+-    Prompt current;
+-    bool hasHeader = false;
+-
+-	// Check if the file is empty or contains only BOM characters
+-    fseek(file, 0, SEEK_END);  
+-    std::streamsize fileSize = ftell(file);
+-    rewind(file);
+-    fseek(file, 0, SEEK_SET);
+-    if (fileSize == 0) {
+-        prompts.push_back(current);
+-        fclose(file);
++void saveRecents(PromptChooserState *state, int selected)
++{
++    state->recents.erase(std::remove(state->recents.begin(), state->recents.end(), selected), state->recents.end());
++    state->recents.insert(state->recents.begin(), selected);
++    if (state->recents.size() > 5)
++        state->recents.resize(5);
++    for (int n = 1; n <= 5; ++n)
++    {
++        wchar_t key[4] = {};
++        wsprintfW(key, L"%d", n);
++        const wchar_t *id = n <= static_cast<int>(state->recents.size())
++            ? state->catalog->prompts[static_cast<size_t>(state->recents[static_cast<size_t>(n - 1)])].id.c_str()
++            : L"";
++        WritePrivateProfileStringW(L"RECENTS", key, id, state->iniPath);
++    }
++}
++
++void populateRecents(HWND dialog, PromptChooserState *state)
++{
++    HWND list = GetDlgItem(dialog, IDC_PROMPT_RECENTS);
++    SendMessageW(list, LB_RESETCONTENT, 0, 0);
++    for (size_t i = 0; i < state->recents.size(); ++i)
++    {
++        const std::wstring label = std::to_wstring(i + 1) + L"   " + displayName(*state->catalog, state->recents[i]);
++        const LRESULT row = SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
++        SendMessageW(list, LB_SETITEMDATA, row, state->recents[i]);
++    }
++}
++
++void populateSuggestions(HWND dialog, PromptChooserState *state)
++{
++    if (state->settingName)
+         return;
++    state->suggestions.clear();
++    const std::wstring name = windowText(GetDlgItem(dialog, IDC_PROMPT_NAME));
++    const std::wstring query = fold(name);
++    HWND list = GetDlgItem(dialog, IDC_PROMPT_SUGGEST);
++    SendMessageW(list, LB_RESETCONTENT, 0, 0);
++    if (query.empty())
++    {
++        state->selectedPrompt = -1;
++        ShowWindow(list, SW_HIDE);
++        SetDlgItemTextW(dialog, IDC_PROMPT_HINT, L"Saisir un nom ou choisir une instruction dans le menu.");
++        return;
++    }
++    state->selectedPrompt = -1;
++    int exact = -1;
++    bool duplicateExact = false;
++    for (size_t i = 0; i < state->catalog->prompts.size(); ++i)
++    {
++        const Prompt &prompt = state->catalog->prompts[i];
++        if (matches(prompt, query))
++            state->suggestions.push_back(static_cast<int>(i));
++        if (fold(prompt.name) == query)
++        {
++            if (exact >= 0)
++                duplicateExact = true;
++            exact = static_cast<int>(i);
++        }
++    }
++    if (exact >= 0 && !duplicateExact)
++        state->selectedPrompt = exact;
++    if (state->suggestions.empty())
++    {
++        ShowWindow(list, SW_HIDE);
++        SetDlgItemTextW(dialog, IDC_PROMPT_HINT, L"Aucune instruction correspondante.");
++    }
++    else if (state->suggestions.size() > 4)
++    {
++        ShowWindow(list, SW_HIDE);
++        const std::wstring hint = std::to_wstring(state->suggestions.size()) + L" correspondances : préciser la recherche.";
++        SetDlgItemTextW(dialog, IDC_PROMPT_HINT, hint.c_str());
++    }
++    else
++    {
++        for (int index : state->suggestions)
++        {
++            const std::wstring label = displayName(*state->catalog, index);
++            const LRESULT row = SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
++            SendMessageW(list, LB_SETITEMDATA, row, index);
++        }
++        const std::wstring hint = std::to_wstring(state->suggestions.size()) + L" correspondance(s).";
++        SetDlgItemTextW(dialog, IDC_PROMPT_HINT, hint.c_str());
++        ShowWindow(list, SW_SHOW);
++        BringWindowToTop(list);
++    }
++}
++
++void chooseListRow(HWND dialog, PromptChooserState *state, int control)
++{
++    HWND list = GetDlgItem(dialog, control);
++    const LRESULT row = SendMessageW(list, LB_GETCURSEL, 0, 0);
++    if (row != LB_ERR)
++    {
++        const LRESULT index = SendMessageW(list, LB_GETITEMDATA, row, 0);
++        if (index != LB_ERR)
++            fillName(dialog, state, static_cast<int>(index));
++    }
++}
++
++void setCheck(HWND dialog, int control)
++{
++    const bool checked = IsDlgButtonChecked(dialog, control) == BST_CHECKED;
++    CheckDlgButton(dialog, control, checked ? BST_UNCHECKED : BST_CHECKED);
++}
++
++bool neutralName(HWND dialog, PromptChooserState *state)
++{
++    const std::wstring value = windowText(GetDlgItem(dialog, IDC_PROMPT_NAME));
++    return value.empty() || (state->selectedPrompt >= 0 &&
++        value == state->catalog->prompts[static_cast<size_t>(state->selectedPrompt)].name);
++}
++
++LRESULT CALLBACK nameEditProc(HWND edit, UINT message, WPARAM wParam, LPARAM lParam)
++{
++    HWND dialog = GetParent(edit);
++    auto *state = reinterpret_cast<PromptChooserState *>(GetWindowLongPtrW(dialog, DWLP_USER));
++    if (state)
++    {
++        if (message == WM_CHAR && neutralName(dialog, state))
++        {
++            if (wParam >= L'1' && wParam <= L'5')
++            {
++                const size_t recent = static_cast<size_t>(wParam - L'1');
++                if (recent < state->recents.size())
++                {
++                    fillName(dialog, state, state->recents[recent]);
++                    return 0;
++                }
++            }
++            if (wParam == L'8' || wParam == L'9')
++            {
++                setCheck(dialog, wParam == L'8' ? IDC_PROMPT_KEEP : IDC_PROMPT_REASONING);
++                return 0;
++            }
++        }
++        if (message == WM_KEYDOWN)
++        {
++            if (wParam == VK_RETURN)
++            {
++                SendMessageW(dialog, WM_COMMAND, IDOK, 0);
++                return 0;
++            }
++            if (wParam == VK_DOWN && IsWindowVisible(GetDlgItem(dialog, IDC_PROMPT_SUGGEST)))
++            {
++                HWND list = GetDlgItem(dialog, IDC_PROMPT_SUGGEST);
++                SendMessageW(list, LB_SETCURSEL, 0, 0);
++                SetFocus(list);
++                return 0;
++            }
++            if (wParam == VK_ESCAPE && IsWindowVisible(GetDlgItem(dialog, IDC_PROMPT_SUGGEST)))
++            {
++                ShowWindow(GetDlgItem(dialog, IDC_PROMPT_SUGGEST), SW_HIDE);
++                return 0;
++            }
++        }
+     }
+-    if (fileSize == 2) {  
+-        std::vector<uint8_t> tmp_buffer(2);  
+-        if (fread(tmp_buffer.data(), 1, 2, file) == 2) {
+-            if (tmp_buffer[0] == 0xFF && tmp_buffer[1] == 0xFE) {
+-                prompts.push_back(current);
+-                fclose(file);  
+-                return;  
+-            }  
+-        }  
++    return CallWindowProcW(state && state->oldNameProc ? state->oldNameProc : DefWindowProcW,
++        edit, message, wParam, lParam);
++}
++
++LRESULT CALLBACK suggestListProc(HWND list, UINT message, WPARAM wParam, LPARAM lParam)
++{
++    HWND dialog = GetParent(list);
++    auto *state = reinterpret_cast<PromptChooserState *>(GetWindowLongPtrW(dialog, DWLP_USER));
++    if (state && message == WM_KEYDOWN)
++    {
++        if (wParam == VK_ESCAPE)
++        {
++            ShowWindow(list, SW_HIDE);
++            SetFocus(GetDlgItem(dialog, IDC_PROMPT_NAME));
++            return 0;
++        }
++        if (wParam == VK_RETURN)
++        {
++            chooseListRow(dialog, state, IDC_PROMPT_SUGGEST);
++            SendMessageW(dialog, WM_COMMAND, IDOK, 0);
++            return 0;
++        }
+     }
++    return CallWindowProcW(state && state->oldSuggestProc ? state->oldSuggestProc : DefWindowProcW,
++        list, message, wParam, lParam);
++}
  
- 	// Check if the file is empty or contains only BOM characters
-     fseek(file, 0, SEEK_END);  
-@@ -67,15 +73,28 @@ void parseInstructionsFile(const WCHAR *filePath, std::vector<Prompt> &prompts)
-         if (!line.empty())
-             line.erase(line.find_last_not_of(L"\r\n") + 1);
+-    while (fgetws(buffer, _countof(buffer), file))
++std::wstring menuLabel(const std::wstring &original, std::set<wchar_t> &used)
++{
++    std::wstring label = original;
++    for (size_t i = 0; i + 1 < label.size(); ++i)
+     {
+-        line = buffer;
+-        if (!line.empty())
+-            line.erase(line.find_last_not_of(L"\r\n") + 1);
++        if (label[i] == L'&')
++        {
++            if (label[i + 1] == L'&')
++            {
++                ++i;
++                continue;
++            }
++            return label;
++        }
++    }
++    for (size_t i = 0; i < label.size(); ++i)
++    {
++        const wchar_t c = static_cast<wchar_t>(std::towlower(label[i]));
++        if (c >= L'a' && c <= L'z' && used.insert(c).second)
++        {
++            label.insert(i, 1, L'&');
++            break;
++        }
++    }
++    return label;
++}
++
++void appendMenuItems(HMENU target, const std::vector<PromptMenuItem> &items,
++    PromptChooserState *state)
++{
++    std::set<wchar_t> used;
++    for (const auto &item : items)
++    {
++        for (size_t i = 0; i + 1 < item.label.size(); ++i)
++        {
++            if (item.label[i] != L'&')
++                continue;
++            if (item.label[i + 1] == L'&')
++                ++i;
++            else
++            {
++                used.insert(static_cast<wchar_t>(std::towlower(item.label[i + 1])));
++                break;
++            }
++        }
++    }
++    for (const auto &item : items)
++    {
++        const std::wstring label = menuLabel(item.label, used);
++        if (item.promptId.empty())
++        {
++            HMENU submenu = CreatePopupMenu();
++            appendMenuItems(submenu, item.children, state);
++            AppendMenuW(target, MF_POPUP, reinterpret_cast<UINT_PTR>(submenu), label.c_str());
++        }
++        else
++        {
++            const int index = findPrompt(*state->catalog, item.promptId);
++            if (index >= 0)
++            {
++                const UINT command = ID_PROMPT_MENU_FIRST + static_cast<UINT>(index);
++                state->menuCommands[command] = index;
++                AppendMenuW(target, MF_STRING, command, label.c_str());
++            }
++        }
++    }
++}
++
++void move(HWND dialog, int control, int x, int y, int width, int height)
++{
++    HWND child = GetDlgItem(dialog, control);
++    if (child)
++        MoveWindow(child, x, y, width, height, TRUE);
++}
  
 -        if (std::regex_match(line, match, headerPattern))
-+        if (line == L"[Global]")
-+        {
-+            if (hasHeader && !inGlobalSection)
-+                prompts.push_back(current);
-+            current = Prompt();
-+            hasHeader = true;
-+            inGlobalSection = true;
-+        }
-+        else if (std::regex_match(line, match, headerPattern))
-         {
-             // If we found a new header and already have a prompt in progress,
-             // save the current one before starting a new one
--            if (hasHeader)
-+            if (hasHeader && !inGlobalSection)
-                 prompts.push_back(current);
-             current = Prompt();
-             current.name = match[1].str();
-             hasHeader = true;
-+            inGlobalSection = false;
-+        }
-+        else if (inGlobalSection)
-+        {
-+            globalContent += line + L"\n";
-         }
-         else if (hasHeader)
-         {
-@@ -90,49 +109,183 @@ void parseInstructionsFile(const WCHAR *filePath, std::vector<Prompt> &prompts)
-     }
-     fclose(file);
-     // Save the final prompt
--    if (hasHeader || !current.content.empty())
-+    if ((hasHeader && !inGlobalSection) || (!hasHeader && !current.content.empty()))
-         prompts.push_back(current);
-+    if (!globalContent.empty())
++int menuMinWidth(HWND dialog, const PromptCatalog *catalog)
++{
++    int width = scaled(dialog, 72);
++    if (!catalog)
++        return width;
++    HDC dc = GetDC(dialog);
++    if (!dc)
++        return width;
++    HFONT font = reinterpret_cast<HFONT>(SendMessageW(dialog, WM_GETFONT, 0, 0));
++    HGDIOBJ oldFont = font ? SelectObject(dc, font) : nullptr;
++    for (const auto &item : catalog->menu)
 +    {
-+        for (Prompt &prompt : prompts)
-+            prompt.content = globalContent + L"\n" + prompt.content;
-+        if (prompts.empty())
-+            prompts.push_back({L"", globalContent});
++        std::wstring label;
++        for (size_t i = 0; i < item.label.size(); ++i)
+         {
+-            // If we found a new header and already have a prompt in progress,
+-            // save the current one before starting a new one
+-            if (hasHeader)
+-                prompts.push_back(current);
+-            current = Prompt();
+-            current.name = match[1].str();
+-            hasHeader = true;
++            if (item.label[i] == L'&' && i + 1 < item.label.size())
++            {
++                if (item.label[i + 1] == L'&')
++                    label += L'&';
++                else
++                    label += item.label[i + 1];
++                ++i;
++            }
++            else
++                label += item.label[i];
+         }
+-        else if (hasHeader)
++        SIZE size = {};
++        GetTextExtentPoint32W(dc, label.c_str(), static_cast<int>(label.size()), &size);
++        width += size.cx + scaled(dialog, 40);
 +    }
- }
- 
++    if (oldFont)
++        SelectObject(dc, oldFont);
++    ReleaseDC(dialog, dc);
++    return width;
++}
++
++void layout(HWND dialog)
++{
++    RECT client = {};
++    GetClientRect(dialog, &client);
++    const int margin = scaled(dialog, 12);
++    const int width = client.right - 2 * margin;
++    const int labelH = scaled(dialog, 18);
++    const int consignesH = scaled(dialog, 58);
++    const int nameH = scaled(dialog, 26);
++    const int checkH = scaled(dialog, 22);
++    const int buttonH = scaled(dialog, 28);
++    const int buttonW = scaled(dialog, 86);
++    int y = margin;
++    move(dialog, IDC_PROMPT_CONSIGNES_LABEL, margin, y, width, labelH);
++    y += labelH;
++    move(dialog, IDC_PROMPT_CONSIGNES, margin, y, width, consignesH);
++    y += consignesH + scaled(dialog, 8);
++    move(dialog, IDC_PROMPT_NAME_LABEL, margin, y, width, labelH);
++    y += labelH;
++    move(dialog, IDC_PROMPT_NAME, margin, y, width, nameH);
++    const int suggestTop = y + nameH;
++    y = suggestTop + scaled(dialog, 7);
++    move(dialog, IDC_PROMPT_HINT, margin, y, width, labelH);
++    y += labelH + scaled(dialog, 4);
++    move(dialog, IDC_PROMPT_RECENT_LABEL, margin, y, width, labelH);
++    y += labelH;
++    const int buttonsY = client.bottom - margin - buttonH;
++    const int reasonY = buttonsY - scaled(dialog, 8) - checkH;
++    const int keepY = reasonY - checkH;
++    const int recentsH = (std::max)(scaled(dialog, 62), keepY - scaled(dialog, 9) - y);
++    move(dialog, IDC_PROMPT_RECENTS, margin, y, width, recentsH);
++    move(dialog, IDC_PROMPT_KEEP, margin, keepY, width, checkH);
++    move(dialog, IDC_PROMPT_REASONING, margin, reasonY, width, checkH);
++    move(dialog, IDOK, client.right - margin - 2 * buttonW - scaled(dialog, 8), buttonsY, buttonW, buttonH);
++    move(dialog, IDCANCEL, client.right - margin - buttonW, buttonsY, buttonW, buttonH);
++    move(dialog, IDC_PROMPT_SUGGEST, margin, suggestTop, width, scaled(dialog, 100));
++    BringWindowToTop(GetDlgItem(dialog, IDC_PROMPT_SUGGEST));
++}
++
++bool submit(HWND dialog, PromptChooserState *state)
++{
++    int selected = state->selectedPrompt;
++    if (selected < 0 && state->suggestions.size() == 1)
++        selected = state->suggestions[0];
++    if (selected < 0)
++    {
++        MessageBoxW(dialog, L"Choisir une instruction existante avant de valider.",
++            L"NppOpenAI", MB_OK | MB_ICONINFORMATION);
++        SetFocus(GetDlgItem(dialog, IDC_PROMPT_NAME));
++        return false;
++    }
++    state->choice->promptIndex = selected;
++    state->choice->consignes = windowText(GetDlgItem(dialog, IDC_PROMPT_CONSIGNES));
++    state->choice->keepSelection = IsDlgButtonChecked(dialog, IDC_PROMPT_KEEP) == BST_CHECKED;
++    state->choice->showReasoning = IsDlgButtonChecked(dialog, IDC_PROMPT_REASONING) == BST_CHECKED;
++    saveRecents(state, selected);
++    EndDialog(dialog, IDOK);
++    return true;
++}
++
++INT_PTR CALLBACK promptChooserProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
++{
++    auto *state = reinterpret_cast<PromptChooserState *>(GetWindowLongPtrW(dialog, DWLP_USER));
++    if (message == WM_INITDIALOG)
++    {
++        state = reinterpret_cast<PromptChooserState *>(lParam);
++        SetWindowLongPtrW(dialog, DWLP_USER, reinterpret_cast<LONG_PTR>(state));
++        loadRecents(state);
++        populateRecents(dialog, state);
++        CheckDlgButton(dialog, IDC_PROMPT_KEEP, state->choice->keepSelection ? BST_CHECKED : BST_UNCHECKED);
++        CheckDlgButton(dialog, IDC_PROMPT_REASONING, state->choice->showReasoning ? BST_CHECKED : BST_UNCHECKED);
++        state->menu = CreateMenu();
++        appendMenuItems(state->menu, state->catalog->menu, state);
++        SetMenu(dialog, state->menu);
++        HWND edit = GetDlgItem(dialog, IDC_PROMPT_NAME);
++        state->oldNameProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(edit, GWLP_WNDPROC,
++            reinterpret_cast<LONG_PTR>(nameEditProc)));
++        SendMessageW(edit, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Rechercher une instruction…"));
++        HWND suggest = GetDlgItem(dialog, IDC_PROMPT_SUGGEST);
++        state->oldSuggestProc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(suggest, GWLP_WNDPROC,
++            reinterpret_cast<LONG_PTR>(suggestListProc)));
++        ShowWindow(GetDlgItem(dialog, IDC_PROMPT_SUGGEST), SW_HIDE);
++        const int savedWidth = GetPrivateProfileIntW(L"PLUGIN", L"prompt_width", 0, state->iniPath);
++        const int savedHeight = GetPrivateProfileIntW(L"PLUGIN", L"prompt_height", 0, state->iniPath);
++        if (savedWidth > 0 && savedHeight > 0)
++            SetWindowPos(dialog, nullptr, 0, 0, savedWidth, savedHeight, SWP_NOMOVE | SWP_NOZORDER);
++        layout(dialog);
++        RECT ownerRect = {}, dialogRect = {};
++        HWND owner = GetParent(dialog);
++        if (owner && GetWindowRect(owner, &ownerRect) && GetWindowRect(dialog, &dialogRect))
+         {
+-            // Add line to current named prompt
+-            current.content += line + L"\n";
++            SetWindowPos(dialog, nullptr,
++                ownerRect.left + ((ownerRect.right - ownerRect.left) - (dialogRect.right - dialogRect.left)) / 2,
++                ownerRect.top + ((ownerRect.bottom - ownerRect.top) - (dialogRect.bottom - dialogRect.top)) / 2,
++                0, 0, SWP_NOSIZE | SWP_NOZORDER);
+         }
++        state->initialized = true;
++        if (state->catalog->prompts.size() == 1)
++            fillName(dialog, state, 0);
+         else
++            populateSuggestions(dialog, state);
++        SetFocus(edit);
++        return FALSE;
++    }
++    if (message == WM_GETMINMAXINFO)
++    {
++        auto *limits = reinterpret_cast<MINMAXINFO *>(lParam);
++        RECT ownerRect = {}, work = {};
++        HWND owner = GetParent(dialog);
++        if (owner)
++            GetWindowRect(owner, &ownerRect);
++        MONITORINFO info = {sizeof(info)};
++        if (GetMonitorInfoW(MonitorFromWindow(owner ? owner : dialog, MONITOR_DEFAULTTONEAREST), &info))
++            work = info.rcWork;
++        const int maxW = (std::min)(ownerRect.right - ownerRect.left, work.right - work.left);
++        const int maxH = (std::min)(ownerRect.bottom - ownerRect.top, work.bottom - work.top);
++        const int minW = (std::max)(scaled(dialog, 500), menuMinWidth(dialog, state ? state->catalog : nullptr));
++        const int minH = scaled(dialog, 410);
++        limits->ptMinTrackSize.x = maxW > 0 ? (std::min)(minW, maxW) : minW;
++        limits->ptMinTrackSize.y = maxH > 0 ? (std::min)(minH, maxH) : minH;
++        if (maxW > 0)
++            limits->ptMaxTrackSize.x = maxW;
++        if (maxH > 0)
++            limits->ptMaxTrackSize.y = maxH;
++        return TRUE;
++    }
++    if (message == WM_SIZE && state && state->initialized)
++    {
++        layout(dialog);
++        return TRUE;
++    }
++    if (message == WM_COMMAND && state)
++    {
++        const int control = LOWORD(wParam);
++        if (HIWORD(wParam) == 0)
+         {
+-            // No headers found yet, add to default prompt
+-            current.content += line + L"\n";
+-        }
+-    }
+-    fclose(file);
+-    // Save the final prompt
+-    if (hasHeader || !current.content.empty())
+-        prompts.push_back(current);
+-}
+-
 -/**
 - * Displays a dialog for the user to choose a system prompt
 - *
@@ -201,38 +1880,20 @@ index 3cd206e..78be5ff 100644
 - * @return Index of the selected prompt, or -1 if the dialog was cancelled
 - */
 -int choosePrompt(HWND owner, const std::vector<Prompt> &prompts, int lastUsedIndex)
-+namespace
- {
+-{
 -    size_t count = prompts.size();
 -    if (count <= 1)
 -        return 0;
-+struct PromptChooserState
-+{
-+    const std::vector<Prompt> *prompts;
-+    int lastUsedIndex;
-+    int familyFilter; // -1 means all families
-+};
- 
+-
 -    std::vector<std::wstring> labels(count);
 -    std::vector<TASKDIALOG_BUTTON> buttons(count);
 -    for (size_t i = 0; i < count; ++i)
-+int promptFamily(const std::wstring &name)
-+{
-+    if (name.size() < 2 || name[1] != L'-')
-+        return 4;
-+    switch (std::towupper(name[0]))
-     {
+-    {
 -        buttons[i].nButtonID = 1000 + int(i);
 -        labels[i] = prompts[i].name.empty() ? L"(default)" : prompts[i].name;
 -        buttons[i].pszButtonText = labels[i].c_str();
-+    case L'E': return 0;
-+    case L'T': return 1;
-+    case L'F': return 2;
-+    case L'C': return 3;
-+    default: return 4;
-     }
-+}
- 
+-    }
+-
 -    TASKDIALOGCONFIG config = {};
 -    config.cbSize = sizeof(config);
 -    config.hwndParent = owner;
@@ -242,172 +1903,214 @@ index 3cd206e..78be5ff 100644
 -    config.cButtons = UINT(count);
 -    config.pButtons = buttons.data();
 -    config.nDefaultButton = 1000 + (lastUsedIndex >= 0 && lastUsedIndex < int(count) ? lastUsedIndex : 0);
-+bool nameContains(const std::wstring &name, const std::wstring &filter)
-+{
-+    auto pos = std::search(name.begin(), name.end(), filter.begin(), filter.end(),
-+        [](wchar_t a, wchar_t b) { return std::towlower(a) == std::towlower(b); });
-+    return pos != name.end();
-+}
-+
-+void populatePromptList(HWND dialog, PromptChooserState *state)
-+{
-+    HWND list = GetDlgItem(dialog, IDC_PROMPT_LIST);
-+    wchar_t filter[256] = {};
-+    GetDlgItemTextW(dialog, IDC_PROMPT_FILTER, filter, _countof(filter));
-+    SendMessageW(list, WM_SETREDRAW, FALSE, 0);
-+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
- 
+-
 -    int pressed = 0;
 -    if (FAILED(TaskDialogIndirect(&config, &pressed, nullptr, nullptr)) || pressed == 0)
 -        return -1;
 -    return pressed - 1000;
-+    const wchar_t *headings[] = {L"EDITION", L"TONALITE", L"FORMAT", L"COMMANDES", L"AUTRES"};
-+    int preferredRow = -1;
-+    int firstPromptRow = -1;
-+    for (int family = 0; family < 5; ++family)
-+    {
-+        if (state->familyFilter >= 0 && family != state->familyFilter)
-+            continue;
-+        bool hasItems = false;
-+        for (size_t i = 0; i < state->prompts->size(); ++i)
-+        {
-+            const Prompt &prompt = (*state->prompts)[i];
-+            const std::wstring &name = prompt.name.empty() ? L"(d\u00e9faut)" : prompt.name;
-+            if (promptFamily(name) != family || !nameContains(name, filter))
-+                continue;
-+            if (!hasItems)
++            const auto menuItem = state->menuCommands.find(static_cast<UINT>(control));
++            if (menuItem != state->menuCommands.end())
 +            {
-+                const std::wstring heading = std::wstring(L"\u2500\u2500 ") + headings[family] + L" \u2500\u2500";
-+                const LRESULT row = SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(heading.c_str()));
-+                SendMessageW(list, LB_SETITEMDATA, row, static_cast<LPARAM>(-1));
-+                hasItems = true;
++                fillName(dialog, state, menuItem->second);
++                return TRUE;
 +            }
-+            const LRESULT row = SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
-+            SendMessageW(list, LB_SETITEMDATA, row, static_cast<LPARAM>(i));
-+            if (firstPromptRow < 0)
-+                firstPromptRow = static_cast<int>(row);
-+            if (static_cast<int>(i) == state->lastUsedIndex)
-+                preferredRow = static_cast<int>(row);
 +        }
-+    }
-+    if (firstPromptRow < 0)
-+    {
-+        const LRESULT row = SendMessageW(list, LB_ADDSTRING, 0,
-+            reinterpret_cast<LPARAM>(L"Aucune instruction correspondante"));
-+        SendMessageW(list, LB_SETITEMDATA, row, static_cast<LPARAM>(-1));
-+    }
-+    else
-+        SendMessageW(list, LB_SETCURSEL, preferredRow >= 0 ? preferredRow : firstPromptRow, 0);
-+    SendMessageW(list, WM_SETREDRAW, TRUE, 0);
-+    InvalidateRect(list, nullptr, TRUE);
-+}
-+
-+void selectPrompt(HWND dialog)
-+{
-+    HWND list = GetDlgItem(dialog, IDC_PROMPT_LIST);
-+    const LRESULT row = SendMessageW(list, LB_GETCURSEL, 0, 0);
-+    if (row == LB_ERR)
-+        return;
-+    const LRESULT index = SendMessageW(list, LB_GETITEMDATA, row, 0);
-+    if (index != LB_ERR)
-+        EndDialog(dialog, static_cast<INT_PTR>(index));
-+}
-+
-+INT_PTR CALLBACK promptChooserProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
-+{
-+    auto *state = reinterpret_cast<PromptChooserState *>(GetWindowLongPtrW(dialog, DWLP_USER));
-+    if (message == WM_INITDIALOG)
-+    {
-+        state = reinterpret_cast<PromptChooserState *>(lParam);
-+        SetWindowLongPtrW(dialog, DWLP_USER, reinterpret_cast<LONG_PTR>(state));
-+        populatePromptList(dialog, state);
-+        HWND owner = GetParent(dialog);
-+        RECT parentRect = {}, dialogRect = {};
-+        if (owner && GetWindowRect(owner, &parentRect) && GetWindowRect(dialog, &dialogRect))
++        if (control == IDC_PROMPT_NAME && HIWORD(wParam) == EN_CHANGE)
 +        {
-+            const int width = dialogRect.right - dialogRect.left;
-+            const int height = dialogRect.bottom - dialogRect.top;
-+            SetWindowPos(dialog, nullptr,
-+                parentRect.left + (parentRect.right - parentRect.left - width) / 2,
-+                parentRect.top + (parentRect.bottom - parentRect.top - height) / 2,
-+                0, 0, SWP_NOSIZE | SWP_NOZORDER);
-+        }
-+        SetFocus(GetDlgItem(dialog, IDC_PROMPT_FILTER));
-+        return FALSE;
-+    }
-+    if (message == WM_COMMAND)
-+    {
-+        const int control = LOWORD(wParam);
-+        if (control == IDC_PROMPT_FILTER && HIWORD(wParam) == EN_CHANGE)
-+        {
-+            populatePromptList(dialog, state);
++            populateSuggestions(dialog, state);
 +            return TRUE;
 +        }
-+        if (control == IDC_PROMPT_LIST && HIWORD(wParam) == LBN_DBLCLK)
++        if ((control == IDC_PROMPT_SUGGEST || control == IDC_PROMPT_RECENTS) &&
++            (HIWORD(wParam) == LBN_SELCHANGE || HIWORD(wParam) == LBN_DBLCLK))
 +        {
-+            selectPrompt(dialog);
++            chooseListRow(dialog, state, control);
++            if (HIWORD(wParam) == LBN_DBLCLK)
++                submit(dialog, state);
 +            return TRUE;
 +        }
 +        if (control == IDOK)
 +        {
-+            selectPrompt(dialog);
++            submit(dialog, state);
 +            return TRUE;
 +        }
 +        if (control == IDCANCEL)
 +        {
-+            EndDialog(dialog, -1);
++            EndDialog(dialog, IDCANCEL);
 +            return TRUE;
 +        }
-+        const int familyButtons[] = {IDC_PROMPT_EDIT, IDC_PROMPT_TONE, IDC_PROMPT_FORMAT, IDC_PROMPT_COMMAND};
-+        if (control == IDC_PROMPT_ALL)
++    }
++    if (message == WM_DESTROY && state)
++    {
++        HWND edit = GetDlgItem(dialog, IDC_PROMPT_NAME);
++        if (edit && state->oldNameProc)
++            SetWindowLongPtrW(edit, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(state->oldNameProc));
++        HWND suggest = GetDlgItem(dialog, IDC_PROMPT_SUGGEST);
++        if (suggest && state->oldSuggestProc)
++            SetWindowLongPtrW(suggest, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(state->oldSuggestProc));
++        RECT rect = {};
++        if (GetWindowRect(dialog, &rect) && state->iniPath)
 +        {
-+            state->familyFilter = -1;
-+            populatePromptList(dialog, state);
-+            SetFocus(GetDlgItem(dialog, IDC_PROMPT_LIST));
-+            return TRUE;
++            const std::wstring width = std::to_wstring(rect.right - rect.left);
++            const std::wstring height = std::to_wstring(rect.bottom - rect.top);
++            WritePrivateProfileStringW(L"PLUGIN", L"prompt_width", width.c_str(), state->iniPath);
++            WritePrivateProfileStringW(L"PLUGIN", L"prompt_height", height.c_str(), state->iniPath);
 +        }
-+        for (int family = 0; family < 4; ++family)
++        if (state->menu)
 +        {
-+            if (control == familyButtons[family])
-+            {
-+                state->familyFilter = family;
-+                populatePromptList(dialog, state);
-+                SetFocus(GetDlgItem(dialog, IDC_PROMPT_LIST));
-+                return TRUE;
-+            }
++            SetMenu(dialog, nullptr);
++            DestroyMenu(state->menu);
++            state->menu = nullptr;
 +        }
++        return TRUE;
 +    }
 +    return FALSE;
 +}
 +}
 +
-+int choosePrompt(HWND owner, const std::vector<Prompt> &prompts, int lastUsedIndex)
++bool choosePrompt(HWND owner, const PromptCatalog &catalog, const WCHAR *iniPath,
++    bool defaultKeepSelection, bool defaultShowReasoning, PromptChoice &choice)
 +{
-+    if (prompts.size() <= 1)
-+        return 0;
-+    PromptChooserState state{&prompts, lastUsedIndex, -1};
++    if (catalog.prompts.empty())
++        return false;
++    choice = PromptChoice();
++    choice.keepSelection = defaultKeepSelection;
++    choice.showReasoning = defaultShowReasoning;
++    PromptChooserState state;
++    state.catalog = &catalog;
++    state.iniPath = iniPath;
++    state.choice = &choice;
 +    const INT_PTR result = DialogBoxParamW(static_cast<HINSTANCE>(_hModule),
 +        MAKEINTRESOURCEW(IDD_PROMPT_CHOOSER), owner, promptChooserProc,
 +        reinterpret_cast<LPARAM>(&state));
-+    return result >= 0 && result < static_cast<INT_PTR>(prompts.size())
-+        ? static_cast<int>(result) : -1;
++    return result == IDOK && choice.promptIndex >= 0;
  }
 diff --git a/src/config/PromptManager.h b/src/config/PromptManager.h
-index 6c16fb4..a4bf96f 100644
+index 6c16fb4..9cc743b 100644
 --- a/src/config/PromptManager.h
 +++ b/src/config/PromptManager.h
-@@ -28,10 +28,13 @@ struct Prompt
-  * Parses the instructions file containing system prompts
-  *
-  * The file can contain multiple prompts in INI-style format:
-+ * [Global]
-+ * Shared instructions applied to every named prompt.
-  * [Prompt:name]
-  * Prompt content here...
-  *
+@@ -1,49 +1,46 @@
+-/**
+- * PromptManager.h - System prompt management for NppOpenAI
+- *
+- * This file defines the data structure and functions for handling
+- * system prompts (instructions) that can be used with OpenAI requests.
+- * It supports parsing multiple named prompts from a file and
+- * presenting them to the user for selection.
+- */
+-
+ #pragma once
+-#include <vector>
+ #include <string>
++#include <vector>
+ #include <windows.h>
+ 
+-/**
+- * Represents a named system prompt
+- *
+- * Each prompt has a name (displayed in the selection dialog)
+- * and content (the actual text sent to the OpenAI API).
+- */
+ struct Prompt
+ {
+-    std::wstring name;    // Display name of the prompt
+-    std::wstring content; // Full text content of the prompt
++    std::wstring id;
++    std::wstring name;
++    std::wstring content;
++    std::vector<std::wstring> searchPaths;
++    size_t sourceLine = 0;
+ };
+ 
+-/**
+- * Parses the instructions file containing system prompts
+- *
+- * The file can contain multiple prompts in INI-style format:
+- * [Prompt:name]
+- * Prompt content here...
+- *
 - * If no section headers are found, the entire file content is treated as a single prompt.
-+ * Text before the first section is ignored when named prompts are present.
-+ * If no section headers are found, the entire file is a single prompt.
-  *
-  * @param filePath Path to the instructions/prompts file
-  * @param prompts Output vector that will be filled with parsed prompts
+- *
+- * @param filePath Path to the instructions/prompts file
+- * @param prompts Output vector that will be filled with parsed prompts
+- */
++struct PromptMenuItem
++{
++    std::wstring label;          // Windows menu text; optional '&' sets the mnemonic.
++    std::wstring promptId;       // Empty for a parent menu.
++    std::vector<PromptMenuItem> children;
++    size_t line = 0;
++};
++
++struct PromptCatalog
++{
++    std::vector<Prompt> prompts;
++    std::vector<PromptMenuItem> menu;
++    bool modernFormat = false;
++};
++
++struct PromptChoice
++{
++    int promptIndex = -1;
++    std::wstring consignes;
++    bool keepSelection = false;
++    bool showReasoning = false;
++};
++
++// The new format is validated as a whole; legacy [Prompt:] files remain supported.
++bool loadPromptCatalog(const WCHAR *filePath, PromptCatalog &catalog, std::wstring &error);
++
++// Compatibility for existing callers that only need prompt bodies.
+ void parseInstructionsFile(const WCHAR *filePath, std::vector<Prompt> &prompts);
+ 
+-/**
+- * Displays a dialog for the user to select one of the available prompts
+- *
+- * @param owner Parent window handle for the dialog
+- * @param prompts Vector of available prompts to choose from
+- * @param lastUsedIndex Index of the last used prompt (for default selection)
+- * @return Index of the selected prompt, or -1 if canceled or no selection
+- */
+-int choosePrompt(HWND owner, const std::vector<Prompt> &prompts, int lastUsedIndex);
++// The dialog is shown even for a single prompt, because it also collects per-call options.
++bool choosePrompt(HWND owner, const PromptCatalog &catalog, const WCHAR *iniPath,
++    bool defaultKeepSelection, bool defaultShowReasoning, PromptChoice &choice);
+diff --git a/src/core/PluginDefinition.cpp b/src/core/PluginDefinition.cpp
+index f67b1d4..69cf0c3 100644
+--- a/src/core/PluginDefinition.cpp
++++ b/src/core/PluginDefinition.cpp
+@@ -71,7 +71,7 @@ std::wstring configAPIValue_presencePenalty = TEXT("0");						// Topic repetitio
+ std::wstring configAPIValue_streaming = TEXT("1");								// Add streaming flag ("1" to enable streaming responses from OpenAI)
+ std::wstring configAPIValue_showReasoning = TEXT("0");							// Show reasoning sections ("1" to show, "0" to hide)
+ std::wstring configAPIValue_keepAlive = TEXT("5m");								// Ollama: keep model in memory (seconds or suffix like 10m, 24h). "-1" to keep indefinitely, "0" to unload immediately. Default to 5 minutes to balance performance and resource usage.
+-bool isKeepQuestion = true;														// Keep original question in response
++bool isKeepQuestion = false;														// Keep original question in response
+ std::vector<std::wstring> chatHistory = {};										// Chat history for context
+ bool isLoadConfigAlertShown = false;											// Show alert only once for loading config
+ 
+diff --git a/src/editor/EditorInterface.cpp b/src/editor/EditorInterface.cpp
+index dcea279..500ed60 100644
+--- a/src/editor/EditorInterface.cpp
++++ b/src/editor/EditorInterface.cpp
+@@ -32,13 +32,14 @@ std::string EditorInterface::getSelectedText(HWND editor)
+     if (selLen <= 0)
+         return "";
+ 
+-    std::string selectedText(selLen, '\0');
++    std::string selectedText(static_cast<size_t>(selLen) + 1, '\0');
+     Sci_TextRangeFull tr;
+     tr.chrg.cpMin = selStart;
+     tr.chrg.cpMax = selEnd;
+     tr.lpstrText = &selectedText[0];
+     ::SendMessage(editor, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&tr);
+ 
++    selectedText.resize(static_cast<size_t>(selLen));
+     return selectedText;
+ }
+ 
+@@ -159,4 +160,4 @@ std::string EditorInterface::getNewlineString(HWND editor)
+             break;
+     }
+ 	return newline;
+-}
+\ No newline at end of file
++}

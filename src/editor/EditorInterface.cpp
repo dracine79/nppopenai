@@ -32,13 +32,14 @@ std::string EditorInterface::getSelectedText(HWND editor)
     if (selLen <= 0)
         return "";
 
-    std::string selectedText(selLen, '\0');
+    std::string selectedText(static_cast<size_t>(selLen) + 1, '\0');
     Sci_TextRangeFull tr;
     tr.chrg.cpMin = selStart;
     tr.chrg.cpMax = selEnd;
     tr.lpstrText = &selectedText[0];
     ::SendMessage(editor, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&tr);
 
+    selectedText.resize(static_cast<size_t>(selLen));
     return selectedText;
 }
 

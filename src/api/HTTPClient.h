@@ -25,10 +25,9 @@ public:
     static bool performStreamingRequest(
         const std::string &url,
         const std::string &request,
+        std::string &response,
         const std::string &apiType,
         const std::string &secretKey,
-        void *targetWindow,
-        unsigned int streamMessageType,
         const std::string &proxy = "");
 
 private:

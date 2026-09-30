@@ -1,52 +1,46 @@
-/**
- * PromptManager.h - System prompt management for NppOpenAI
- *
- * This file defines the data structure and functions for handling
- * system prompts (instructions) that can be used with OpenAI requests.
- * It supports parsing multiple named prompts from a file and
- * presenting them to the user for selection.
- */
-
 #pragma once
-#include <vector>
 #include <string>
+#include <vector>
 #include <windows.h>
 
-/**
- * Represents a named system prompt
- *
- * Each prompt has a name (displayed in the selection dialog)
- * and content (the actual text sent to the OpenAI API).
- */
 struct Prompt
 {
-    std::wstring name;    // Display name of the prompt
-    std::wstring content; // Full text content of the prompt
+    std::wstring id;
+    std::wstring name;
+    std::wstring content;
+    std::vector<std::wstring> searchPaths;
+    size_t sourceLine = 0;
 };
 
-/**
- * Parses the instructions file containing system prompts
- *
- * The file can contain multiple prompts in INI-style format:
- * [Global]
- * Shared instructions applied to every named prompt.
- * [Prompt:name]
- * Prompt content here...
- *
- * Text before the first section is ignored when named prompts are present.
- * If no section headers are found, the entire file is a single prompt.
- *
- * @param filePath Path to the instructions/prompts file
- * @param prompts Output vector that will be filled with parsed prompts
- */
+struct PromptMenuItem
+{
+    std::wstring label;          // Windows menu text; optional '&' sets the mnemonic.
+    std::wstring promptId;       // Empty for a parent menu.
+    std::vector<PromptMenuItem> children;
+    size_t line = 0;
+};
+
+struct PromptCatalog
+{
+    std::vector<Prompt> prompts;
+    std::vector<PromptMenuItem> menu;
+    bool modernFormat = false;
+};
+
+struct PromptChoice
+{
+    int promptIndex = -1;
+    std::wstring consignes;
+    bool keepSelection = false;
+    bool showReasoning = false;
+};
+
+// The new format is validated as a whole; legacy [Prompt:] files remain supported.
+bool loadPromptCatalog(const WCHAR *filePath, PromptCatalog &catalog, std::wstring &error);
+
+// Compatibility for existing callers that only need prompt bodies.
 void parseInstructionsFile(const WCHAR *filePath, std::vector<Prompt> &prompts);
 
-/**
- * Displays a dialog for the user to select one of the available prompts
- *
- * @param owner Parent window handle for the dialog
- * @param prompts Vector of available prompts to choose from
- * @param lastUsedIndex Index of the last used prompt (for default selection)
- * @return Index of the selected prompt, or -1 if canceled or no selection
- */
-int choosePrompt(HWND owner, const std::vector<Prompt> &prompts, int lastUsedIndex);
+// The dialog is shown even for a single prompt, because it also collects per-call options.
+bool choosePrompt(HWND owner, const PromptCatalog &catalog, const WCHAR *iniPath,
+    bool defaultKeepSelection, bool defaultShowReasoning, PromptChoice &choice);
