@@ -330,7 +330,7 @@ namespace OpenAIClientImpl
             ::SendMessage(curScintilla, SCI_SETSEL, selEnd, selEnd);
             std::string insertion = eol + eol;
             if (!choice.consignes.empty())
-                insertion += "Consigne appliquée : " + toUTF8(choice.consignes) + eol + eol;
+                insertion += "Consigne appliquée :" + eol + toUTF8(choice.consignes) + eol + eol;
             insertion += extractedContent;
             EditorInterface::insertTextAtCursor(curScintilla, insertion);
         }

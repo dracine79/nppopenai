@@ -89,7 +89,7 @@ index 3f92767..3f89051 100644
  
  private:
 diff --git a/src/api/OpenAIClient.cpp b/src/api/OpenAIClient.cpp
-index 569f58e..db42630 100644
+index 569f58e..1b00e6f 100644
 --- a/src/api/OpenAIClient.cpp
 +++ b/src/api/OpenAIClient.cpp
 @@ -1,4 +1,4 @@
@@ -426,7 +426,7 @@ index 569f58e..db42630 100644
 +            ::SendMessage(curScintilla, SCI_SETSEL, selEnd, selEnd);
 +            std::string insertion = eol + eol;
 +            if (!choice.consignes.empty())
-+                insertion += "Consigne appliquée : " + toUTF8(choice.consignes) + eol + eol;
++                insertion += "Consigne appliquée :" + eol + toUTF8(choice.consignes) + eol + eol;
 +            insertion += extractedContent;
 +            EditorInterface::insertTextAtCursor(curScintilla, insertion);
 +        }
