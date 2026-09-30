@@ -261,6 +261,19 @@ namespace ResponseParsers
             }
         }
 
+        // Some Ollama models emit reasoning as a bare prefix followed only by
+        // the closing marker. There is no opening tag to match in that case.
+        const size_t orphanEnd = result.find("</think>");
+        if (orphanEnd != std::string::npos)
+        {
+            result.erase(0, orphanEnd + sizeof("</think>") - 1);
+            const size_t firstContent = result.find_first_not_of("\r\n");
+            if (firstContent != std::string::npos)
+                result.erase(0, firstContent);
+            else
+                result.clear();
+        }
+
         return result;
     }
 }

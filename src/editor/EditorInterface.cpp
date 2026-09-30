@@ -1,6 +1,6 @@
 #include "EditorInterface.h"
 #include "core/external_globals.h"
-// #include "EncodingUtils.h"
+#include <limits>
 
 /**
  * Get the handle to the current Scintilla editor
@@ -32,15 +32,118 @@ std::string EditorInterface::getSelectedText(HWND editor)
     if (selLen <= 0)
         return "";
 
-    std::string selectedText(static_cast<size_t>(selLen) + 1, '\0');
-    Sci_TextRangeFull tr;
-    tr.chrg.cpMin = selStart;
-    tr.chrg.cpMax = selEnd;
-    tr.lpstrText = &selectedText[0];
-    ::SendMessage(editor, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&tr);
-
-    selectedText.resize(static_cast<size_t>(selLen));
+    ::SendMessage(editor, SCI_SETTARGETSTART, selStart, 0);
+    ::SendMessage(editor, SCI_SETTARGETEND, selEnd, 0);
+    const Sci_Position utf8Length = ::SendMessage(editor, SCI_TARGETASUTF8, 0, 0);
+    if (utf8Length <= 0)
+        return "";
+    std::string selectedText(static_cast<size_t>(utf8Length) + 1, '\0');
+    const Sci_Position copied = ::SendMessage(editor, SCI_TARGETASUTF8, 0,
+        reinterpret_cast<LPARAM>(&selectedText[0]));
+    if (copied != utf8Length)
+        return "";
+    selectedText.resize(static_cast<size_t>(copied));
     return selectedText;
+}
+
+bool EditorInterface::encodeForDocument(HWND editor, const std::string &utf8,
+    std::string &encoded, std::wstring &error)
+{
+    encoded.clear();
+    error.clear();
+    if (utf8.empty())
+        return true;
+    if (utf8.size() > static_cast<size_t>((std::numeric_limits<int>::max)()) ||
+        utf8.find('\0') != std::string::npos)
+    {
+        error = L"La réponse contient un texte non insérable.";
+        return false;
+    }
+    const int wideLength = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+        utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
+    if (wideLength <= 0)
+    {
+        error = L"La réponse n'est pas un texte UTF-8 valide.";
+        return false;
+    }
+    std::wstring wide(static_cast<size_t>(wideLength), L'\0');
+    if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
+        static_cast<int>(utf8.size()), &wide[0], wideLength) != wideLength)
+    {
+        error = L"La réponse n'est pas un texte UTF-8 valide.";
+        return false;
+    }
+
+    ::SendMessage(editor, SCI_SETLENGTHFORENCODE, utf8.size(), 0);
+    const Sci_Position needed = ::SendMessage(editor, SCI_ENCODEDFROMUTF8,
+        reinterpret_cast<WPARAM>(utf8.c_str()), 0);
+    if (needed <= 0)
+    {
+        error = L"Impossible de convertir la réponse dans l'encodage du document.";
+        return false;
+    }
+    encoded.resize(static_cast<size_t>(needed) + 1);
+    ::SendMessage(editor, SCI_SETLENGTHFORENCODE, utf8.size(), 0);
+    const Sci_Position written = ::SendMessage(editor, SCI_ENCODEDFROMUTF8,
+        reinterpret_cast<WPARAM>(utf8.c_str()), reinterpret_cast<LPARAM>(&encoded[0]));
+    if (written != needed)
+    {
+        error = L"Impossible de convertir la réponse dans l'encodage du document.";
+        encoded.clear();
+        return false;
+    }
+    encoded.resize(static_cast<size_t>(written));
+    if (encoded.find('\0') != std::string::npos)
+    {
+        error = L"La réponse contient un caractère nul non insérable.";
+        encoded.clear();
+        return false;
+    }
+
+    UINT codePage = static_cast<UINT>(::SendMessage(editor, SCI_GETCODEPAGE, 0, 0));
+    if (codePage == 0)
+    {
+        const UINT charset = static_cast<UINT>(::SendMessage(editor,
+            SCI_STYLEGETCHARACTERSET, STYLE_DEFAULT, 0));
+        if (charset == SC_CHARSET_8859_15)
+            codePage = 28605;
+        else if (charset == SC_CHARSET_OEM866 || charset == SC_CHARSET_CYRILLIC)
+            codePage = charset;
+        else if (charset == SC_CHARSET_DEFAULT || charset == SC_CHARSET_ANSI)
+            codePage = ::GetACP();
+        else
+        {
+            CHARSETINFO charsetInfo = {};
+            if (::TranslateCharsetInfo(reinterpret_cast<DWORD *>(static_cast<UINT_PTR>(charset)),
+                &charsetInfo, TCI_SRCCHARSET))
+                codePage = charsetInfo.ciACP;
+        }
+    }
+    if (codePage == 0 || encoded.size() > static_cast<size_t>((std::numeric_limits<int>::max)()))
+    {
+        error = L"Impossible de vérifier l'encodage du document; la sélection est conservée.";
+        encoded.clear();
+        return false;
+    }
+    const int roundtripLength = ::MultiByteToWideChar(codePage, 0, encoded.data(),
+        static_cast<int>(encoded.size()), nullptr, 0);
+    if (roundtripLength <= 0)
+    {
+        error = L"Impossible de vérifier la conversion vers l'encodage du document.";
+        encoded.clear();
+        return false;
+    }
+    std::wstring roundtrip(static_cast<size_t>(roundtripLength), L'\0');
+    if (::MultiByteToWideChar(codePage, 0, encoded.data(),
+        static_cast<int>(encoded.size()), &roundtrip[0], roundtripLength) != roundtripLength ||
+        roundtrip != wide)
+    {
+        error = L"Certains caractères ne peuvent pas être conservés dans l'encodage du document. "
+                L"La sélection est conservée.";
+        encoded.clear();
+        return false;
+    }
+    return true;
 }
 
 /**

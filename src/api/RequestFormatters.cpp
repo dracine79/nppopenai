@@ -103,6 +103,8 @@ namespace RequestFormatters
         // Ollama uses different parameter names
         requestJson["model"] = modelStr;
         requestJson["prompt"] = promptStr;
+        if (options.sendThinkingParameter)
+            requestJson["think"] = options.showReasoning;
 
         // Add system prompt if not empty
         if (!systemPromptStr.empty())

@@ -89,7 +89,7 @@ index 3f92767..3f89051 100644
  
  private:
 diff --git a/src/api/OpenAIClient.cpp b/src/api/OpenAIClient.cpp
-index 569f58e..1b00e6f 100644
+index 569f58e..4d30f9f 100644
 --- a/src/api/OpenAIClient.cpp
 +++ b/src/api/OpenAIClient.cpp
 @@ -1,4 +1,4 @@
@@ -122,7 +122,7 @@ index 569f58e..1b00e6f 100644
  // Global handle to direct streaming chunks (defined in external_globals.h)
  HWND s_streamTargetScintilla = nullptr;
  
-@@ -67,75 +58,39 @@ size_t OpenAIcURLCallback(void *contents, size_t size, size_t nmemb, void *userp
+@@ -67,75 +58,92 @@ size_t OpenAIcURLCallback(void *contents, size_t size, size_t nmemb, void *userp
  }
  
  /**
@@ -155,19 +155,43 @@ index 569f58e..1b00e6f 100644
 +static std::string extractStreamContent(const std::string &wire, const std::string &apiType)
 +{
      std::string content;
--
++    size_t start = 0;
++    while (start < wire.size())
++    {
++        const size_t end = wire.find('\n', start);
++        std::string line = wire.substr(start, end == std::string::npos ? end : end - start);
++        if (!line.empty() && line.back() == '\r')
++            line.pop_back();
++        if (!line.empty())
++            content += StreamParser::extractContent(line, apiType);
++        if (end == std::string::npos)
++            break;
++        start = end + 1;
++    }
++    return content;
++}
+ 
 -    try
--    {
++static std::string extractOllamaThinking(const std::string &wire, bool streaming)
++{
++    std::string thinking;
++    auto append = [&thinking](const std::string &chunk)
+     {
 -        // Handle streaming responses for different API formats
 -        if (!chunk.empty())
--        {
++        try
+         {
 -            std::string apiType = toUTF8(configAPIValue_responseType);
 -            content = StreamParser::extractContent(chunk, apiType);
--        }
++            const auto value = json::parse(chunk);
++            if (value.contains("thinking") && value["thinking"].is_string())
++                thinking += value["thinking"].get<std::string>();
+         }
 -
 -        // If we have content to display or this might be plain text (and short)
 -        if (!content.empty() || (chunk.size() < 100 && !StreamParser::isCompletionMarker(chunk)))
--        {
++        catch (...)
+         {
 -            // If we couldn't extract content but have a small chunk, use the raw chunk
 -            if (content.empty() && chunk.size() < 100 && !StreamParser::isCompletionMarker(chunk))
 -            {
@@ -185,41 +209,59 @@ index 569f58e..1b00e6f 100644
 -                    ::SendMessage(s_streamTargetScintilla, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(content.c_str()));
 -                }
 -            }
--        }
++            // The normal response parser reports malformed response data.
+         }
 -    }
 -    catch (...)
-+    size_t start = 0;
-+    while (start < wire.size())
++    };
++    if (!streaming)
++        append(wire);
++    else
      {
 -        // Fallback for any unexpected errors - just send the raw chunk
 -        // But first check if it's a completion marker
 -        if (StreamParser::isCompletionMarker(chunk))
--        {
++        size_t start = 0;
++        while (start < wire.size())
+         {
 -            return totalSize;
--        }
--
++            const size_t end = wire.find('\n', start);
++            append(wire.substr(start, end == std::string::npos ? end : end - start));
++            if (end == std::string::npos)
++                break;
++            start = end + 1;
+         }
++    }
++    return thinking;
++}
+ 
 -        // Send content directly to the Scintilla editor (fallback path)
 -        if (s_streamTargetScintilla && IsWindow(s_streamTargetScintilla))
--        {
++static std::string useDocumentLineEndings(const std::string &text, const std::string &eol)
++{
++    std::string normalized;
++    normalized.reserve(text.size());
++    for (size_t i = 0; i < text.size(); ++i)
++    {
++        if (text[i] == '\r')
+         {
 -            ::SendMessage(s_streamTargetScintilla, SCI_REPLACESEL, 0, reinterpret_cast<LPARAM>(chunk.c_str()));
--        }
-+        const size_t end = wire.find('\n', start);
-+        std::string line = wire.substr(start, end == std::string::npos ? end : end - start);
-+        if (!line.empty() && line.back() == '\r')
-+            line.pop_back();
-+        if (!line.empty())
-+            content += StreamParser::extractContent(line, apiType);
-+        if (end == std::string::npos)
-+            break;
-+        start = end + 1;
++            if (i + 1 < text.size() && text[i + 1] == '\n')
++                ++i;
++            normalized += eol;
+         }
++        else if (text[i] == '\n')
++            normalized += eol;
++        else
++            normalized += text[i];
      }
 -
 -    return _loaderDlg.isCancelled() ? CURL_READFUNC_ABORT : totalSize;
-+    return content;
++    return normalized;
  }
  
  /**
-@@ -197,43 +152,35 @@ namespace OpenAIClientImpl
+@@ -197,43 +205,42 @@ namespace OpenAIClientImpl
              return;
          }
  
@@ -227,12 +269,12 @@ index 569f58e..1b00e6f 100644
 -        std::string selectedText = EditorInterface::getSelectedText(curScintilla);
 -        if (selectedText.empty())
 +        const std::string selectedText = EditorInterface::getSelectedText(curScintilla);
-+        PromptCatalog catalog;
-+        std::wstring catalogError;
-+        if (!loadPromptCatalog(instructionsFilePath, catalog, catalogError))
++        if (::SendMessage(curScintilla, SCI_GETSELECTIONEND, 0, 0) >
++            ::SendMessage(curScintilla, SCI_GETSELECTIONSTART, 0, 0) && selectedText.empty())
          {
 -            instructionsFileError(L"No text selected.", L"NppOpenAI Error");
-+            instructionsFileError(catalogError.c_str(), L"NppOpenAI - Instructions invalides");
++            instructionsFileError(L"Impossible de lire la sélection dans l'encodage du document.",
++                L"NppOpenAI - Encodage");
              return;
 -        } // Get system prompt - handle multiple prompts case BEFORE showing loader
 -        std::wstring systemPrompt = APIUtils::getSystemPrompt();
@@ -240,7 +282,9 @@ index 569f58e..1b00e6f 100644
 -        // If multiple prompts are available, show selection dialog
 -        if (systemPrompt == L"MULTIPLE_PROMPTS_AVAILABLE")
 +        }
-+        if (catalog.prompts.empty())
++        PromptCatalog catalog;
++        std::wstring catalogError;
++        if (!loadPromptCatalog(instructionsFilePath, catalog, catalogError))
          {
 -            // Parse prompts from instructions file
 -            std::vector<Prompt> prompts;
@@ -267,6 +311,11 @@ index 569f58e..1b00e6f 100644
 -                // Fallback to default if something went wrong
 -                systemPrompt = configAPIValue_instructions;
 -            }
++            instructionsFileError(catalogError.c_str(), L"NppOpenAI - Instructions invalides");
++            return;
++        }
++        if (catalog.prompts.empty())
++        {
 +            instructionsFileError(L"Aucune instruction dans le fichier.", L"NppOpenAI Error");
 +            return;
 +        }
@@ -289,7 +338,11 @@ index 569f58e..1b00e6f 100644
          }
  
          // NOW show the loader dialog after prompt selection is complete
-@@ -267,7 +214,7 @@ namespace OpenAIClientImpl
+@@ -264,10 +271,11 @@ namespace OpenAIClientImpl
+         options.presencePenalty = std::stof(toUTF8(configAPIValue_presencePenalty));
+         options.keepAlive = configAPIValue_keepAlive;
+         options.streaming = streaming;
++        options.showReasoning = choice.showReasoning;
  
          // Prepare API request with grouped options
          std::string request = APIUtils::prepareApiRequest(
@@ -298,7 +351,7 @@ index 569f58e..1b00e6f 100644
              systemPrompt,
              configAPIValue_responseType,
              options);
-@@ -278,9 +225,26 @@ namespace OpenAIClientImpl
+@@ -278,9 +286,26 @@ namespace OpenAIClientImpl
          std::string chatRoute = toUTF8(configAPIValue_chatRoute);
          std::string url = APIUtils::buildApiUrl(baseUrl, chatRoute);
          */
@@ -326,7 +379,7 @@ index 569f58e..1b00e6f 100644
          std::string secretKey = toUTF8(configAPIValue_secretKey);
  
          std::string response;
-@@ -294,14 +258,7 @@ namespace OpenAIClientImpl
+@@ -294,20 +319,30 @@ namespace OpenAIClientImpl
                  ::SendMessage(nppData._nppHandle, NPPM_SETSTATUSBAR, STATUSBAR_DOC_TYPE, (LPARAM)debugMsg.c_str());
              }
  
@@ -342,7 +395,30 @@ index 569f58e..1b00e6f 100644
          }
          else
          {
-@@ -342,58 +299,45 @@ namespace OpenAIClientImpl
+             // For non-streaming mode, perform regular request
+             ok = HTTPClient::performRequest(url, request, response, apiType, secretKey, proxy);
+         }
++        if (!ok && apiType == "ollama" &&
++            response.find("does not support thinking") != std::string::npos &&
++            !_loaderDlg.isCancelled())
++        {
++            // Non-reasoning models reject think=true. Retry once without that
++            // optional parameter; the text filter still handles inline tags.
++            options.sendThinkingParameter = false;
++            request = APIUtils::prepareApiRequest(userText, systemPrompt,
++                configAPIValue_responseType, options);
++            response.clear();
++            if (streaming)
++                ok = HTTPClient::performStreamingRequest(url, request, response,
++                    apiType, secretKey, proxy);
++            else
++                ok = HTTPClient::performRequest(url, request, response,
++                    apiType, secretKey, proxy);
++        }
+         if (!ok)
+         {
+             _loaderDlg.display(false);
+@@ -342,58 +377,66 @@ namespace OpenAIClientImpl
                  instructionsFileError(errorMsg.c_str(), L"NppOpenAI Error");
              }
              return;
@@ -410,28 +486,49 @@ index 569f58e..1b00e6f 100644
 +            instructionsFileError(error.c_str(), L"NppOpenAI - Réponse invalide");
 +            _loaderDlg.display(false);
 +            return;
-         }
--        // For streaming mode, the text is already in the editor through the callback        // Calculate and display elapsed time
++        }
++        if (apiType == "ollama" && choice.showReasoning)
++        {
++            const std::string thinking = extractOllamaThinking(response, streaming);
++            if (!thinking.empty())
++                extractedContent = thinking + "\n\n" + extractedContent;
++        }
 +        extractedContent = ResponseParsers::processThinkingSections(extractedContent, choice.showReasoning);
 +        if (extractedContent.empty())
 +        {
 +            instructionsFileError(L"Réponse vide ou impossible à lire.", L"NppOpenAI Error");
 +            _loaderDlg.display(false);
 +            return;
-+        }
+         }
+-        // For streaming mode, the text is already in the editor through the callback        // Calculate and display elapsed time
 +        const std::string eol = EditorInterface::getNewlineString(curScintilla);
++        extractedContent = useDocumentLineEndings(extractedContent, eol);
++        std::string insertion = extractedContent;
++        if (choice.keepSelection)
++        {
++            insertion = eol + eol;
++            if (!choice.consignes.empty())
++                insertion += "Consigne appliquée :" + eol +
++                    useDocumentLineEndings(toUTF8(choice.consignes), eol) + eol + eol;
++            insertion += extractedContent;
++        }
++        std::string documentBytes;
++        std::wstring encodingError;
++        if (!EditorInterface::encodeForDocument(curScintilla, insertion,
++            documentBytes, encodingError))
++        {
++            instructionsFileError(encodingError.c_str(), L"NppOpenAI - Encodage");
++            _loaderDlg.display(false);
++            return;
++        }
 +        if (choice.keepSelection)
 +        {
 +            const Sci_Position selEnd = ::SendMessage(curScintilla, SCI_GETSELECTIONEND, 0, 0);
 +            ::SendMessage(curScintilla, SCI_SETSEL, selEnd, selEnd);
-+            std::string insertion = eol + eol;
-+            if (!choice.consignes.empty())
-+                insertion += "Consigne appliquée :" + eol + toUTF8(choice.consignes) + eol + eol;
-+            insertion += extractedContent;
-+            EditorInterface::insertTextAtCursor(curScintilla, insertion);
++            EditorInterface::insertTextAtCursor(curScintilla, documentBytes);
 +        }
 +        else
-+            EditorInterface::replaceSelectedText(curScintilla, extractedContent);
++            EditorInterface::replaceSelectedText(curScintilla, documentBytes);
 +
 +        // Calculate and display elapsed time
          auto endTime = std::chrono::high_resolution_clock::now();
@@ -450,8 +547,48 @@ index ef3440a..4148210 100644
   * @return Number of bytes processed
   */
  size_t OpenAIStreamCallback(void *contents, size_t size, size_t nmemb, void *userp);
+diff --git a/src/api/RequestFormatters.cpp b/src/api/RequestFormatters.cpp
+index 9dc2ee6..d24e1eb 100644
+--- a/src/api/RequestFormatters.cpp
++++ b/src/api/RequestFormatters.cpp
+@@ -103,6 +103,8 @@ namespace RequestFormatters
+         // Ollama uses different parameter names
+         requestJson["model"] = modelStr;
+         requestJson["prompt"] = promptStr;
++        if (options.sendThinkingParameter)
++            requestJson["think"] = options.showReasoning;
+ 
+         // Add system prompt if not empty
+         if (!systemPromptStr.empty())
+@@ -267,4 +269,4 @@ namespace RequestFormatters
+             return formatOpenAIRequest;
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/src/api/RequestFormatters.h b/src/api/RequestFormatters.h
+index b02a552..e5147c5 100644
+--- a/src/api/RequestFormatters.h
++++ b/src/api/RequestFormatters.h
+@@ -23,6 +23,8 @@ namespace RequestFormatters
+         float presencePenalty = 0.0f;
+         std::wstring keepAlive; // e.g. "3600", "10m", "24h"
+         bool streaming = false;
++        bool showReasoning = false;
++        bool sendThinkingParameter = true;
+     };
+     // Formatter function type definition
+     // New signature: prompt, systemPrompt, options
+@@ -69,4 +71,4 @@ namespace RequestFormatters
+     FormatterFunction getFormatterForEndpoint(const std::wstring& endpointType);
+ }
+ 
+-#endif // REQUEST_FORMATTERS_H
+\ No newline at end of file
++#endif // REQUEST_FORMATTERS_H
 diff --git a/src/api/ResponseParsers.cpp b/src/api/ResponseParsers.cpp
-index 2b615e2..217693f 100644
+index 2b615e2..d28c1f7 100644
 --- a/src/api/ResponseParsers.cpp
 +++ b/src/api/ResponseParsers.cpp
 @@ -17,7 +17,6 @@
@@ -528,7 +665,7 @@ index 2b615e2..217693f 100644
          if (showReasoning)
          {
              // Return the text as-is if we're showing reasoning
-@@ -269,7 +255,8 @@ namespace ResponseParsers
+@@ -269,11 +255,25 @@ namespace ResponseParsers
              }
              else
              {
@@ -538,6 +675,23 @@ index 2b615e2..217693f 100644
                  break;
              }
          }
+ 
++        // Some Ollama models emit reasoning as a bare prefix followed only by
++        // the closing marker. There is no opening tag to match in that case.
++        const size_t orphanEnd = result.find("</think>");
++        if (orphanEnd != std::string::npos)
++        {
++            result.erase(0, orphanEnd + sizeof("</think>") - 1);
++            const size_t firstContent = result.find_first_not_of("\r\n");
++            if (firstContent != std::string::npos)
++                result.erase(0, firstContent);
++            else
++                result.clear();
++        }
++
+         return result;
+     }
+ }
 diff --git a/src/api/ResponseParsers.h b/src/api/ResponseParsers.h
 index 7fda75a..b5fe2e2 100644
 --- a/src/api/ResponseParsers.h
@@ -2088,29 +2242,169 @@ index f67b1d4..69cf0c3 100644
  bool isLoadConfigAlertShown = false;											// Show alert only once for loading config
  
 diff --git a/src/editor/EditorInterface.cpp b/src/editor/EditorInterface.cpp
-index dcea279..500ed60 100644
+index dcea279..c7904f5 100644
 --- a/src/editor/EditorInterface.cpp
 +++ b/src/editor/EditorInterface.cpp
-@@ -32,13 +32,14 @@ std::string EditorInterface::getSelectedText(HWND editor)
+@@ -1,6 +1,6 @@
+ #include "EditorInterface.h"
+ #include "core/external_globals.h"
+-// #include "EncodingUtils.h"
++#include <limits>
+ 
+ /**
+  * Get the handle to the current Scintilla editor
+@@ -32,16 +32,120 @@ std::string EditorInterface::getSelectedText(HWND editor)
      if (selLen <= 0)
          return "";
  
 -    std::string selectedText(selLen, '\0');
-+    std::string selectedText(static_cast<size_t>(selLen) + 1, '\0');
-     Sci_TextRangeFull tr;
-     tr.chrg.cpMin = selStart;
-     tr.chrg.cpMax = selEnd;
-     tr.lpstrText = &selectedText[0];
-     ::SendMessage(editor, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&tr);
- 
-+    selectedText.resize(static_cast<size_t>(selLen));
+-    Sci_TextRangeFull tr;
+-    tr.chrg.cpMin = selStart;
+-    tr.chrg.cpMax = selEnd;
+-    tr.lpstrText = &selectedText[0];
+-    ::SendMessage(editor, SCI_GETTEXTRANGEFULL, 0, (LPARAM)&tr);
+-
++    ::SendMessage(editor, SCI_SETTARGETSTART, selStart, 0);
++    ::SendMessage(editor, SCI_SETTARGETEND, selEnd, 0);
++    const Sci_Position utf8Length = ::SendMessage(editor, SCI_TARGETASUTF8, 0, 0);
++    if (utf8Length <= 0)
++        return "";
++    std::string selectedText(static_cast<size_t>(utf8Length) + 1, '\0');
++    const Sci_Position copied = ::SendMessage(editor, SCI_TARGETASUTF8, 0,
++        reinterpret_cast<LPARAM>(&selectedText[0]));
++    if (copied != utf8Length)
++        return "";
++    selectedText.resize(static_cast<size_t>(copied));
      return selectedText;
  }
  
-@@ -159,4 +160,4 @@ std::string EditorInterface::getNewlineString(HWND editor)
++bool EditorInterface::encodeForDocument(HWND editor, const std::string &utf8,
++    std::string &encoded, std::wstring &error)
++{
++    encoded.clear();
++    error.clear();
++    if (utf8.empty())
++        return true;
++    if (utf8.size() > static_cast<size_t>((std::numeric_limits<int>::max)()) ||
++        utf8.find('\0') != std::string::npos)
++    {
++        error = L"La réponse contient un texte non insérable.";
++        return false;
++    }
++    const int wideLength = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
++        utf8.data(), static_cast<int>(utf8.size()), nullptr, 0);
++    if (wideLength <= 0)
++    {
++        error = L"La réponse n'est pas un texte UTF-8 valide.";
++        return false;
++    }
++    std::wstring wide(static_cast<size_t>(wideLength), L'\0');
++    if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(),
++        static_cast<int>(utf8.size()), &wide[0], wideLength) != wideLength)
++    {
++        error = L"La réponse n'est pas un texte UTF-8 valide.";
++        return false;
++    }
++
++    ::SendMessage(editor, SCI_SETLENGTHFORENCODE, utf8.size(), 0);
++    const Sci_Position needed = ::SendMessage(editor, SCI_ENCODEDFROMUTF8,
++        reinterpret_cast<WPARAM>(utf8.c_str()), 0);
++    if (needed <= 0)
++    {
++        error = L"Impossible de convertir la réponse dans l'encodage du document.";
++        return false;
++    }
++    encoded.resize(static_cast<size_t>(needed) + 1);
++    ::SendMessage(editor, SCI_SETLENGTHFORENCODE, utf8.size(), 0);
++    const Sci_Position written = ::SendMessage(editor, SCI_ENCODEDFROMUTF8,
++        reinterpret_cast<WPARAM>(utf8.c_str()), reinterpret_cast<LPARAM>(&encoded[0]));
++    if (written != needed)
++    {
++        error = L"Impossible de convertir la réponse dans l'encodage du document.";
++        encoded.clear();
++        return false;
++    }
++    encoded.resize(static_cast<size_t>(written));
++    if (encoded.find('\0') != std::string::npos)
++    {
++        error = L"La réponse contient un caractère nul non insérable.";
++        encoded.clear();
++        return false;
++    }
++
++    UINT codePage = static_cast<UINT>(::SendMessage(editor, SCI_GETCODEPAGE, 0, 0));
++    if (codePage == 0)
++    {
++        const UINT charset = static_cast<UINT>(::SendMessage(editor,
++            SCI_STYLEGETCHARACTERSET, STYLE_DEFAULT, 0));
++        if (charset == SC_CHARSET_8859_15)
++            codePage = 28605;
++        else if (charset == SC_CHARSET_OEM866 || charset == SC_CHARSET_CYRILLIC)
++            codePage = charset;
++        else if (charset == SC_CHARSET_DEFAULT || charset == SC_CHARSET_ANSI)
++            codePage = ::GetACP();
++        else
++        {
++            CHARSETINFO charsetInfo = {};
++            if (::TranslateCharsetInfo(reinterpret_cast<DWORD *>(static_cast<UINT_PTR>(charset)),
++                &charsetInfo, TCI_SRCCHARSET))
++                codePage = charsetInfo.ciACP;
++        }
++    }
++    if (codePage == 0 || encoded.size() > static_cast<size_t>((std::numeric_limits<int>::max)()))
++    {
++        error = L"Impossible de vérifier l'encodage du document; la sélection est conservée.";
++        encoded.clear();
++        return false;
++    }
++    const int roundtripLength = ::MultiByteToWideChar(codePage, 0, encoded.data(),
++        static_cast<int>(encoded.size()), nullptr, 0);
++    if (roundtripLength <= 0)
++    {
++        error = L"Impossible de vérifier la conversion vers l'encodage du document.";
++        encoded.clear();
++        return false;
++    }
++    std::wstring roundtrip(static_cast<size_t>(roundtripLength), L'\0');
++    if (::MultiByteToWideChar(codePage, 0, encoded.data(),
++        static_cast<int>(encoded.size()), &roundtrip[0], roundtripLength) != roundtripLength ||
++        roundtrip != wide)
++    {
++        error = L"Certains caractères ne peuvent pas être conservés dans l'encodage du document. "
++                L"La sélection est conservée.";
++        encoded.clear();
++        return false;
++    }
++    return true;
++}
++
+ /**
+  * Replace the currently selected text in a Scintilla editor
+  *
+@@ -159,4 +263,4 @@ std::string EditorInterface::getNewlineString(HWND editor)
              break;
      }
  	return newline;
 -}
 \ No newline at end of file
 +}
+diff --git a/src/editor/EditorInterface.h b/src/editor/EditorInterface.h
+index dbe50e0..426e328 100644
+--- a/src/editor/EditorInterface.h
++++ b/src/editor/EditorInterface.h
+@@ -16,9 +16,14 @@ namespace EditorInterface
+     // Get the current Scintilla editor handle
+     HWND getCurrentScintilla();
+ 
+-    // Get selected text from editor (returns the text or empty string if no selection)
++    // Get selected text as UTF-8, regardless of the document encoding.
+     std::string getSelectedText(HWND editor);
+ 
++    // Convert UTF-8 output to the active document encoding before insertion.
++    // Reject characters that cannot be represented without changing them.
++    bool encodeForDocument(HWND editor, const std::string &utf8,
++        std::string &encoded, std::wstring &error);
++
+     // Replace selected text in editor
+     void replaceSelectedText(HWND editor, const std::string &text);
+ 

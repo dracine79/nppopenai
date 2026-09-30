@@ -16,8 +16,13 @@ namespace EditorInterface
     // Get the current Scintilla editor handle
     HWND getCurrentScintilla();
 
-    // Get selected text from editor (returns the text or empty string if no selection)
+    // Get selected text as UTF-8, regardless of the document encoding.
     std::string getSelectedText(HWND editor);
+
+    // Convert UTF-8 output to the active document encoding before insertion.
+    // Reject characters that cannot be represented without changing them.
+    bool encodeForDocument(HWND editor, const std::string &utf8,
+        std::string &encoded, std::wstring &error);
 
     // Replace selected text in editor
     void replaceSelectedText(HWND editor, const std::string &text);

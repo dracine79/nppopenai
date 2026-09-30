@@ -93,6 +93,59 @@ static std::string extractStreamContent(const std::string &wire, const std::stri
     return content;
 }
 
+static std::string extractOllamaThinking(const std::string &wire, bool streaming)
+{
+    std::string thinking;
+    auto append = [&thinking](const std::string &chunk)
+    {
+        try
+        {
+            const auto value = json::parse(chunk);
+            if (value.contains("thinking") && value["thinking"].is_string())
+                thinking += value["thinking"].get<std::string>();
+        }
+        catch (...)
+        {
+            // The normal response parser reports malformed response data.
+        }
+    };
+    if (!streaming)
+        append(wire);
+    else
+    {
+        size_t start = 0;
+        while (start < wire.size())
+        {
+            const size_t end = wire.find('\n', start);
+            append(wire.substr(start, end == std::string::npos ? end : end - start));
+            if (end == std::string::npos)
+                break;
+            start = end + 1;
+        }
+    }
+    return thinking;
+}
+
+static std::string useDocumentLineEndings(const std::string &text, const std::string &eol)
+{
+    std::string normalized;
+    normalized.reserve(text.size());
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        if (text[i] == '\r')
+        {
+            if (i + 1 < text.size() && text[i + 1] == '\n')
+                ++i;
+            normalized += eol;
+        }
+        else if (text[i] == '\n')
+            normalized += eol;
+        else
+            normalized += text[i];
+    }
+    return normalized;
+}
+
 /**
  * Display an error message when the instructions file cannot be read or found
  *
@@ -153,6 +206,13 @@ namespace OpenAIClientImpl
         }
 
         const std::string selectedText = EditorInterface::getSelectedText(curScintilla);
+        if (::SendMessage(curScintilla, SCI_GETSELECTIONEND, 0, 0) >
+            ::SendMessage(curScintilla, SCI_GETSELECTIONSTART, 0, 0) && selectedText.empty())
+        {
+            instructionsFileError(L"Impossible de lire la sélection dans l'encodage du document.",
+                L"NppOpenAI - Encodage");
+            return;
+        }
         PromptCatalog catalog;
         std::wstring catalogError;
         if (!loadPromptCatalog(instructionsFilePath, catalog, catalogError))
@@ -211,6 +271,7 @@ namespace OpenAIClientImpl
         options.presencePenalty = std::stof(toUTF8(configAPIValue_presencePenalty));
         options.keepAlive = configAPIValue_keepAlive;
         options.streaming = streaming;
+        options.showReasoning = choice.showReasoning;
 
         // Prepare API request with grouped options
         std::string request = APIUtils::prepareApiRequest(
@@ -265,6 +326,23 @@ namespace OpenAIClientImpl
             // For non-streaming mode, perform regular request
             ok = HTTPClient::performRequest(url, request, response, apiType, secretKey, proxy);
         }
+        if (!ok && apiType == "ollama" &&
+            response.find("does not support thinking") != std::string::npos &&
+            !_loaderDlg.isCancelled())
+        {
+            // Non-reasoning models reject think=true. Retry once without that
+            // optional parameter; the text filter still handles inline tags.
+            options.sendThinkingParameter = false;
+            request = APIUtils::prepareApiRequest(userText, systemPrompt,
+                configAPIValue_responseType, options);
+            response.clear();
+            if (streaming)
+                ok = HTTPClient::performStreamingRequest(url, request, response,
+                    apiType, secretKey, proxy);
+            else
+                ok = HTTPClient::performRequest(url, request, response,
+                    apiType, secretKey, proxy);
+        }
         if (!ok)
         {
             _loaderDlg.display(false);
@@ -316,6 +394,12 @@ namespace OpenAIClientImpl
             _loaderDlg.display(false);
             return;
         }
+        if (apiType == "ollama" && choice.showReasoning)
+        {
+            const std::string thinking = extractOllamaThinking(response, streaming);
+            if (!thinking.empty())
+                extractedContent = thinking + "\n\n" + extractedContent;
+        }
         extractedContent = ResponseParsers::processThinkingSections(extractedContent, choice.showReasoning);
         if (extractedContent.empty())
         {
@@ -324,18 +408,33 @@ namespace OpenAIClientImpl
             return;
         }
         const std::string eol = EditorInterface::getNewlineString(curScintilla);
+        extractedContent = useDocumentLineEndings(extractedContent, eol);
+        std::string insertion = extractedContent;
+        if (choice.keepSelection)
+        {
+            insertion = eol + eol;
+            if (!choice.consignes.empty())
+                insertion += "Consigne appliquée :" + eol +
+                    useDocumentLineEndings(toUTF8(choice.consignes), eol) + eol + eol;
+            insertion += extractedContent;
+        }
+        std::string documentBytes;
+        std::wstring encodingError;
+        if (!EditorInterface::encodeForDocument(curScintilla, insertion,
+            documentBytes, encodingError))
+        {
+            instructionsFileError(encodingError.c_str(), L"NppOpenAI - Encodage");
+            _loaderDlg.display(false);
+            return;
+        }
         if (choice.keepSelection)
         {
             const Sci_Position selEnd = ::SendMessage(curScintilla, SCI_GETSELECTIONEND, 0, 0);
             ::SendMessage(curScintilla, SCI_SETSEL, selEnd, selEnd);
-            std::string insertion = eol + eol;
-            if (!choice.consignes.empty())
-                insertion += "Consigne appliquée :" + eol + toUTF8(choice.consignes) + eol + eol;
-            insertion += extractedContent;
-            EditorInterface::insertTextAtCursor(curScintilla, insertion);
+            EditorInterface::insertTextAtCursor(curScintilla, documentBytes);
         }
         else
-            EditorInterface::replaceSelectedText(curScintilla, extractedContent);
+            EditorInterface::replaceSelectedText(curScintilla, documentBytes);
 
         // Calculate and display elapsed time
         auto endTime = std::chrono::high_resolution_clock::now();

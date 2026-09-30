@@ -23,6 +23,8 @@ namespace RequestFormatters
         float presencePenalty = 0.0f;
         std::wstring keepAlive; // e.g. "3600", "10m", "24h"
         bool streaming = false;
+        bool showReasoning = false;
+        bool sendThinkingParameter = true;
     };
     // Formatter function type definition
     // New signature: prompt, systemPrompt, options

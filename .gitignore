@@ -91,6 +91,7 @@ bin32/
 tests/bin/
 tests/obj/
 tests/obj-chooser/
+tests/obj-reasoning/
 NppOpenAI_instructions.migrated
 NppOpenAI.ini.migrated
 

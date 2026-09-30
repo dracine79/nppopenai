@@ -19,7 +19,11 @@ Le focus initial est sur **Nom de l'instruction**. La recherche ignore la casse 
 
 Dans le champ Nom au repos, `1` à `5` insèrent une instruction récente, `8` change **Conserver la sélection et la consigne**, et `9` change **Afficher le raisonnement**. Pendant la saisie partielle d'un nom, ces chiffres sont du texte ordinaire. La fenêtre peut être redimensionnée et mémorise sa taille.
 
-Le champ **Consignes** reçoit une précision ponctuelle distincte de la sélection. Le plugin ne recherche aucune balise `//` dans le document. Si la conservation est cochée, le passage reste en place et la consigne utilisée, si présente, est recopiée avant la réponse. Sinon, la réponse remplace la sélection. Une consigne seule peut être envoyée sans sélection. La réponse en flux est assemblée avant insertion : l'annulation et les erreurs conservent le passage; l'affichage progressif est suspendu dans cette version. L'option de raisonnement agit sur les blocs `<think>…</think>` présents dans le texte reçu.
+Le champ **Consignes** reçoit une précision ponctuelle distincte de la sélection. Le plugin ne recherche aucune balise `//` dans le document. Si la conservation est cochée, le passage reste en place et la consigne utilisée, si présente, est recopiée avant la réponse. Sinon, la réponse remplace la sélection. Une consigne seule peut être envoyée sans sélection. La réponse en flux est assemblée avant insertion : l'annulation et les erreurs conservent le passage; l'affichage progressif est suspendu dans cette version.
+
+Avec l'API native Ollama, **Afficher le raisonnement** transmet `think=true` ou `think=false` selon la case. Si le modèle refuse ce paramètre, le plugin réessaie une fois sans lui. Le plugin retire aussi les blocs `<think>…</think>` et les préfixes terminés seulement par `</think>` lorsque la case est décochée. Si Ollama fournit un champ `thinking` distinct, il est inclus lorsque la case est cochée. Le comportement exact dépend encore du modèle et de la version d'Ollama.
+
+Le passage sélectionné est transmis en UTF-8 à l'API, puis la réponse est convertie vers l'encodage du document actif avant insertion. Les fins de ligne suivent le mode du document. Si des caractères ne peuvent pas être conservés dans cet encodage, le plugin affiche une erreur et garde la sélection intacte. Notepad++ conserve le format du fichier à l'enregistrement; le plugin ne change pas son encodage ni son indicateur BOM.
 
 ## Fichier d'instructions
 
@@ -39,4 +43,4 @@ Dans `[API]` du `.ini`, une seule ligne `model=` doit être active. Les autres p
 
 ## Vérifications
 
-Compilation Release x64 avec Visual Studio 2022. Le test `CatalogProbe` vérifie le nouveau format, l'ancien format et plusieurs erreurs de structure; le fichier migré de 22 instructions passe la validation. Le test `ChooserSmoke` ouvre la vraie boîte de dialogue et vérifie le menu, la recherche accentuée, les instructions récentes et les deux options. Le fonctionnement dans l'installation active de Notepad++ et la réponse du serveur après installation restent à vérifier sur place.
+Compilation Release x64 avec Visual Studio 2022. Le test `CatalogProbe` vérifie le nouveau format, l'ancien format et plusieurs erreurs de structure; le fichier migré de 22 instructions passe la validation. Le test `ChooserSmoke` ouvre la vraie boîte de dialogue et vérifie le menu, la recherche accentuée, les instructions récentes et les deux options. `ReasoningProbe` vérifie le paramètre Ollama `think` et le filtrage de deux formes de réflexion. Le fonctionnement dans l'installation active de Notepad++ reste à vérifier avec un fichier temporaire en UTF-8 et un autre en ANSI contenant des accents, en comparant le rendu et l'encodage après sauvegarde et réouverture.
