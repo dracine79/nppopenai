@@ -16,6 +16,8 @@ La fenêtre a une largeur fixe et une liste verticale regroupée par famille. Le
 
 Raccourcis de famille : `Alt+T` Tous, `Alt+E` Édition, `Alt+O` Tonalité, `Alt+F` Format, `Alt+C` Commandes. `Alt+V` valide la sélection. La dernière instruction utilisée reste présélectionnée si elle figure dans les résultats.
 
+La [spécification du futur sélecteur personnalisable](docs/SPEC_SELECTEUR_INSTRUCTIONS.md) décrit les menus définis dans le fichier d’instructions, la recherche avec complétion, les cinq choix récents, le champ Consignes et les options par appel. Ces fonctions ne sont pas encore présentes dans la DLL publiée.
+
 ## Préprompt commun
 
 Ajouter une section `[Global]` dans `NppOpenAI_instructions`, par exemple entre le tableau de repères et le premier `[Prompt:...]` :
