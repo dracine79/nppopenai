@@ -2,7 +2,7 @@
 
 DLL compilée à partir de [NppOpenAI](https://github.com/Krazal/nppopenai), version 0.5.0.0, révision `34da3cb`. Le fichier `source.patch` décrit les modifications. La licence du projet figure dans `LICENSE`.
 
-Ce dossier est aussi un dépôt Git local contenant le code source modifié et les DLL livrées. Aucun dépôt distant n'est configuré.
+Ce dépôt est un [fork du projet original](https://github.com/Krazal/nppopenai). Il contient le code source modifié et les DLL livrées. Le dépôt distant `origin` correspond à ce fork; `upstream` pointe vers le projet original.
 
 ## Installation
 
