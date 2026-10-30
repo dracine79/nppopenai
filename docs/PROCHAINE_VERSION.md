@@ -1,4 +1,4 @@
-# Prochaine version — libellé de consigne et encodage
+# Prochaine version — encodage et destination des réponses
 
 ## Défaut signalé
 
@@ -16,3 +16,30 @@ Le code construit l'insertion dans `src/api/OpenAIClient.cpp` avec un littéral 
 4. Vérifier qu'un caractère impossible à représenter dans l'encodage du document déclenche une erreur sans modifier la sélection.
 
 **Périmètre de cette note :** documentation du défaut seulement. Aucun DLL n'a été recompilé pour ce point.
+
+## Destination de la réponse et changement d’onglet
+
+### Défaut signalé
+
+Pendant une requête, l’utilisateur peut changer d’onglet. La réponse est malgré tout écrite sans garantir sa destination d’origine, avec le risque de modifier le mauvais document ou le mauvais emplacement.
+
+### Comportement prévu
+
+1. Au lancement de la requête, mémoriser l’identité stable du document source et la plage de texte sélectionnée. Le nom du fichier, le numéro d’onglet et le contrôle Scintilla actif ne suffisent pas à identifier durablement cette destination.
+2. À la réception, retrouver le document source même si un autre onglet est actif. Avec **Conserver la sélection et la consigne**, insérer la consigne et la réponse immédiatement après la sélection d’origine. Sans conservation, remplacer uniquement la plage d’origine si elle est encore valide.
+3. Un simple changement d’onglet ou déplacement du curseur ne change pas la destination. Revenir à l’onglet source et donner le focus à la réponse lors de son insertion.
+4. Si le document a été fermé ou si des modifications rendent la plage d’origine incertaine, ne rien insérer automatiquement. Conserver la réponse en mémoire et demander où la placer, avec des choix explicites : emplacement sélectionné dans un document ouvert, nouvel onglet ou report de l’insertion. Ne jamais choisir silencieusement l’onglet actif.
+5. Sans sélection initiale, demander la destination avant l’insertion si aucun point d’insertion fiable n’a été mémorisé.
+6. Appliquer les conversions d’encodage et les fins de ligne du document effectivement choisi. Une annulation ou une erreur doit préserver les documents et permettre de récupérer la réponse.
+7. Associer chaque réponse à sa propre requête; si plusieurs requêtes sont autorisées, leurs destinations ne doivent pas se mélanger.
+
+### Vérifications prévues
+
+- Lancer depuis un onglet A puis passer à B : seule la destination prévue dans A reçoit la réponse.
+- Déplacer le curseur ou changer de sélection pendant la requête : la destination d’origine reste utilisée.
+- Modifier le document source avant le retour : suivre la plage si cela reste fiable, sinon demander une destination.
+- Fermer le document source puis ouvrir un autre document au même nom : ne pas confondre les deux documents.
+- Vérifier les deux modes, conservation et remplacement, ainsi que les documents sans nom et les deux vues de Notepad++.
+- Annuler le choix de destination puis récupérer la réponse sans perte ni modification du mauvais document.
+
+**Statut :** besoin ajouté aux travaux de la prochaine version; comportement à implémenter et à tester.
