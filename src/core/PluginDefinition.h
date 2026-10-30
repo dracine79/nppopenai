@@ -56,7 +56,7 @@ const TCHAR NPP_PLUGIN_NAME[] = TEXT("NppOpenAI");
 //
 // Here define the number of your plugin commands
 //
-const int nbFunc = 11; // Increased from 10 to 11 to accommodate new "Toggle Debug Mode" command
+const int nbFunc = 12;
 
 // Config vars: API
 #include "../config/ConfigManager.h"

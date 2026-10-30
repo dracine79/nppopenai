@@ -141,7 +141,7 @@ namespace ConfigManagerImpl
             if (getConfirmedTrailingV1[0] != '1')
             {
 				// Show confirmation dialog to user to update API URL
-                int result = ::MessageBox(nppData._nppHandle, (L"The ì" + configAPIValue_apiURL + L"î API URL does not end with ì/v1/î.\n\nDo you want to append it?\n(Recommended for remote access)").c_str(), L"NppOpenAI: Confirm", MB_YESNO | MB_ICONQUESTION);
+                int result = ::MessageBox(nppData._nppHandle, (L"The ‚Äú" + configAPIValue_apiURL + L"‚Äù API URL does not end with ‚Äú/v1/‚Äù.\n\nDo you want to append it?\n(Recommended for remote access)").c_str(), L"NppOpenAI: Confirm", MB_YESNO | MB_ICONQUESTION);
                 if (result == IDYES)
                 {
                     // Remove trailing slash if present

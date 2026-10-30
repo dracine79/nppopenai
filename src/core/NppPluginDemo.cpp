@@ -12,6 +12,7 @@
 
 #include "PluginDefinition.h"
 #include "editor/EditorInterface.h"
+#include "editor/ResponsePlacement.h"
 #include "Scintilla.h"
 #include "core/external_globals.h"
 #include "utils/EncodingUtils.h"
@@ -116,6 +117,7 @@ extern "C" __declspec(dllexport) FuncItem *getFuncsArray(int *nbF)
  */
 extern "C" __declspec(dllexport) void beNotified(SCNotification *notifyCode)
 {
+    ResponsePlacement::notify(*notifyCode);
 	switch (notifyCode->nmhdr.code)
 	{
 	case NPPN_TBMODIFICATION:
@@ -133,6 +135,7 @@ extern "C" __declspec(dllexport) void beNotified(SCNotification *notifyCode)
 
 	case NPPN_SHUTDOWN:
 	{
+		ResponsePlacement::shutdown();
 		// Clean up resources when Notepad++ is shutting down
 		commandMenuCleanUp();
 	}

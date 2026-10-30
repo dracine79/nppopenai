@@ -9,6 +9,7 @@
 #include "EncodingUtils.h"		  // UTF-8 / wide-char conversion utilities
 #include "DebugUtils.h"			  // Debug logging functions
 #include "OpenAIClient.h"		  // API client wrapper for OpenAI integration
+#include "editor/ResponsePlacement.h"
 #include "ui/UIHelpers.h"		  // UI-related functions for menus and dialogs
 
 // Libraries for file operations, cURL, and JSON handling
@@ -160,6 +161,7 @@ void commandMenuInit()
 	setCommand(8, TEXT("---"), NULL, NULL, false);									   // Separator
 	setCommand(9, TEXT("&About"), openAboutDlg, NULL, false);
 	setCommand(10, TEXT("&Toggle Debug Mode"), toggleDebugMode, NULL, debugMode);
+	setCommand(11, TEXT("Placer la réponse en attente"), ResponsePlacement::showPending, NULL, false);
 }
 
 // Add and update toolbar icons in Notepad++

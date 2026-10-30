@@ -5,18 +5,21 @@
 
 HANDLE _hModule = GetModuleHandleW(nullptr);
 
-static HWND waitForDialog()
+static HWND waitForDialog(DWORD threadId)
 {
     for (int attempt = 0; attempt < 200; ++attempt)
     {
-        HWND dialog = FindWindowW(L"#32770", L"NppOpenAI - Choisir une instruction");
-        if (dialog)
+        HWND found = nullptr;
+        EnumThreadWindows(threadId, [](HWND window, LPARAM data) -> BOOL
         {
-            DWORD processId = 0;
-            GetWindowThreadProcessId(dialog, &processId);
-            if (processId == GetCurrentProcessId())
-                return dialog;
-        }
+            wchar_t title[100] = {};
+            GetWindowTextW(window, title, 100);
+            if (wcscmp(title, L"NppOpenAI - Choisir une instruction") == 0 &&
+                IsWindowVisible(window) && GetMenu(window))
+                *reinterpret_cast<HWND *>(data) = window;
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&found));
+        if (found) return found;
         Sleep(20);
     }
     return nullptr;
@@ -37,7 +40,7 @@ int wmain(int argc, wchar_t **argv)
     PromptChoice first;
     bool firstResult = false;
     std::thread firstThread([&] { firstResult = choosePrompt(nullptr, catalog, ini, false, false, first); });
-    HWND dialog = waitForDialog();
+    HWND dialog = waitForDialog(GetThreadId(firstThread.native_handle()));
     bool okay = dialog && GetMenu(dialog) && GetMenuItemCount(GetMenu(dialog)) == 2;
     if (dialog)
     {
@@ -66,7 +69,7 @@ int wmain(int argc, wchar_t **argv)
     PromptChoice second;
     bool secondResult = false;
     std::thread secondThread([&] { secondResult = choosePrompt(nullptr, catalog, ini, false, false, second); });
-    dialog = waitForDialog();
+    dialog = waitForDialog(GetThreadId(secondThread.native_handle()));
     if (dialog)
     {
         HWND name = GetDlgItem(dialog, IDC_PROMPT_NAME);

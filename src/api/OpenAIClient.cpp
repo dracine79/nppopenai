@@ -27,6 +27,7 @@
 #include "StreamParser.h"
 #include "APIUtils.h"
 #include "editor/EditorInterface.h"
+#include "editor/ResponsePlacement.h"
 
 /**
  * Stream data is buffered until the request succeeds. This keeps the selected
@@ -126,26 +127,6 @@ static std::string extractOllamaThinking(const std::string &wire, bool streaming
     return thinking;
 }
 
-static std::string useDocumentLineEndings(const std::string &text, const std::string &eol)
-{
-    std::string normalized;
-    normalized.reserve(text.size());
-    for (size_t i = 0; i < text.size(); ++i)
-    {
-        if (text[i] == '\r')
-        {
-            if (i + 1 < text.size() && text[i + 1] == '\n')
-                ++i;
-            normalized += eol;
-        }
-        else if (text[i] == '\n')
-            normalized += eol;
-        else
-            normalized += text[i];
-    }
-    return normalized;
-}
-
 /**
  * Display an error message when the instructions file cannot be read or found
  *
@@ -195,6 +176,11 @@ namespace OpenAIClientImpl
 
     void askChatGPT()
     {
+        if (!ResponsePlacement::beginRequest()) return;
+        struct RequestGuard
+        {
+            ~RequestGuard() { ResponsePlacement::endRequest(); }
+        } requestGuard;
         // Record start time for elapsed time calculation
         auto startTime = std::chrono::high_resolution_clock::now();
 
@@ -240,7 +226,7 @@ namespace OpenAIClientImpl
         {
             userText = "Consignes ponctuelles :\n" + toUTF8(choice.consignes);
             if (!selectedText.empty())
-                userText += "\n\nTexte à traiter :\n" + selectedText;
+                userText += toUTF8(L"\n\nTexte à traiter :\n") + selectedText;
         }
 
         // NOW show the loader dialog after prompt selection is complete
@@ -407,34 +393,8 @@ namespace OpenAIClientImpl
             _loaderDlg.display(false);
             return;
         }
-        const std::string eol = EditorInterface::getNewlineString(curScintilla);
-        extractedContent = useDocumentLineEndings(extractedContent, eol);
-        std::string insertion = extractedContent;
-        if (choice.keepSelection)
-        {
-            insertion = eol + eol;
-            if (!choice.consignes.empty())
-                insertion += "Consigne appliquée :" + eol +
-                    useDocumentLineEndings(toUTF8(choice.consignes), eol) + eol + eol;
-            insertion += extractedContent;
-        }
-        std::string documentBytes;
-        std::wstring encodingError;
-        if (!EditorInterface::encodeForDocument(curScintilla, insertion,
-            documentBytes, encodingError))
-        {
-            instructionsFileError(encodingError.c_str(), L"NppOpenAI - Encodage");
-            _loaderDlg.display(false);
-            return;
-        }
-        if (choice.keepSelection)
-        {
-            const Sci_Position selEnd = ::SendMessage(curScintilla, SCI_GETSELECTIONEND, 0, 0);
-            ::SendMessage(curScintilla, SCI_SETSEL, selEnd, selEnd);
-            EditorInterface::insertTextAtCursor(curScintilla, documentBytes);
-        }
-        else
-            EditorInterface::replaceSelectedText(curScintilla, documentBytes);
+        _loaderDlg.display(false);
+        ResponsePlacement::deliver(extractedContent, choice.consignes, choice.keepSelection);
 
         // Calculate and display elapsed time
         auto endTime = std::chrono::high_resolution_clock::now();
