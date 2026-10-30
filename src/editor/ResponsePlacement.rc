@@ -1,0 +1,15 @@
+#include <windows.h>
+#include "ResponsePlacementResource.h"
+#pragma code_page(65001)
+
+IDD_RESPONSE_PLACEMENT DIALOGEX 0, 0, 370, 142
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "NppOpenAI - Placer la réponse"
+FONT 9, "Segoe UI"
+BEGIN
+    LTEXT "", IDC_RESPONSE_EXPLANATION, 10, 10, 350, 72
+    PUSHBUTTON "Emplacement d’origine", IDC_RESPONSE_ORIGIN, 10, 88, 112, 23, WS_TABSTOP
+    PUSHBUTTON "Définir l’endroit…", IDC_RESPONSE_DEFINE, 129, 88, 112, 23, WS_TABSTOP
+    PUSHBUTTON "Presse-papiers", IDC_RESPONSE_CLIPBOARD, 248, 88, 112, 23, WS_TABSTOP
+    LTEXT "Fermer reporte le choix. Menu : Placer la réponse en attente.", -1, 10, 120, 350, 13
+END

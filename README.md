@@ -25,6 +25,14 @@ Avec l'API native Ollama, **Afficher le raisonnement** transmet `think=true` ou 
 
 Le passage sélectionné est transmis en UTF-8 à l'API, puis la réponse est convertie vers l'encodage du document actif avant insertion. Les fins de ligne suivent le mode du document. Si des caractères ne peuvent pas être conservés dans cet encodage, le plugin affiche une erreur et garde la sélection intacte. Notepad++ conserve le format du fichier à l'enregistrement; le plugin ne change pas son encodage ni son indicateur BOM.
 
+## Destination de la réponse
+
+La destination est mémorisée à l’envoi : document et sélection, ou curseur si aucune sélection. Si vous restez dans le même onglet sans modifier le document, la réponse utilise cette destination, même si vous déplacez le curseur.
+
+Après un changement d’onglet ou une modification du document, un popup propose **Emplacement d’origine**, **Définir l’endroit…** ou **Presse-papiers**. L’origine est désactivée si le document a été modifié, fermé ou son encodage a changé. Pour définir un autre endroit, placez le curseur dans un onglet puis cliquez sur **Insérer ici** : la réponse seule est ajoutée au curseur sans remplacer une sélection. Le presse-papiers reçoit également la réponse seule, en Unicode.
+
+Fermer le popup conserve la réponse en mémoire. Le menu **Placer la réponse en attente**, ou **Ask OpenAI**, rouvre le choix. Placez ou copiez cette réponse avant de lancer une nouvelle requête ou de fermer Notepad++. L’insertion respecte l’encodage et les fins de ligne de sa destination; une conversion impossible préserve le document et laisse la réponse disponible.
+
 ## Fichier d'instructions
 
 Le format cible accepte `[Info]` (notes non envoyées), `[Global]` (texte commun), `[PlaceHolder:ID]` (bloc réutilisable sans autre placeholder), `[Instruction:ID]` (instruction avec références `{{ID}}`) et `[Menu]` (arbre de libellés et identifiants). Le fichier `NppOpenAI_instructions.example` illustre la syntaxe. Les anciens blocs `[Prompt:Nom]` restent utilisables; mélanger les deux formats est refusé avec un diagnostic.

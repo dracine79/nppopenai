@@ -101,6 +101,12 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat Condition="'$(Configuration)' == 'Release'">None</DebugInformationFormat>
+    </ClCompile>
+  </ItemDefinitionGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <LinkIncremental>true</LinkIncremental>
     <LibraryPath>$(VC_LibraryPath_x86);$(WindowsSDK_LibraryPath_x86);$(NETFXKitsDir)Lib\um\x86</LibraryPath>
@@ -210,8 +216,8 @@
       <ImportLibrary>$(TargetName).lib</ImportLibrary>
       <AdditionalLibraryDirectories>$(SolutionDir)lib</AdditionalLibraryDirectories>
     </Link>
-    <PostBuildEvent>
-      <Command>copy ..\license.txt ..\bin\license.txt
+    <PostBuildEvent Condition="'$(SkipPackaging)' != 'true'">
+      <Command>copy ..\LICENSE ..\bin\license.txt
 copy ..\readme.FIRST ..\bin\readme.FIRST
 powershell Compress-Archive -Path '$(ProjectDir)helper_files_$(PlatformTarget)\*', '$(TargetPath)' -DestinationPath '$(TargetDir)NppOpenAI.zip' -Force</Command>
     </PostBuildEvent>
@@ -242,8 +248,8 @@ powershell Compress-Archive -Path '$(ProjectDir)helper_files_$(PlatformTarget)\*
     <ResourceCompile>
       <AdditionalIncludeDirectories>$(ProjectDir)include;$(SolutionDir)..;$(SolutionDir)..\src;$(SolutionDir)..\src\core;$(SolutionDir)..\src\utils;$(SolutionDir)..\src\api;$(SolutionDir)..\src\npp;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
-    <PostBuildEvent>
-      <Command>copy ..\license.txt ..\bin64\license.txt
+    <PostBuildEvent Condition="'$(SkipPackaging)' != 'true'">
+      <Command>copy ..\LICENSE ..\bin64\license.txt
 copy ..\readme.FIRST ..\bin64\readme.FIRST
 powershell Compress-Archive -Path '$(ProjectDir)helper_files_$(PlatformTarget)\*', '$(TargetPath)' -DestinationPath '$(TargetDir)NppOpenAI.zip' -Force</Command>
     </PostBuildEvent>
@@ -273,8 +279,8 @@ powershell Compress-Archive -Path '$(ProjectDir)helper_files_$(PlatformTarget)\*
     <ResourceCompile>
       <AdditionalIncludeDirectories>$(ProjectDir)include;$(SolutionDir)..;$(SolutionDir)..\src;$(SolutionDir)..\src\utils;$(SolutionDir)..\src\npp;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ResourceCompile>
-    <PostBuildEvent>
-      <Command>copy ..\license.txt ..\arm64\license.txt
+    <PostBuildEvent Condition="'$(SkipPackaging)' != 'true'">
+      <Command>copy ..\LICENSE ..\arm64\license.txt
 copy ..\readme.FIRST ..\arm64\readme.FIRST</Command>
     </PostBuildEvent>
   </ItemDefinitionGroup>
